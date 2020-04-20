@@ -323,6 +323,7 @@ func (az *AzureProvider) createPublicIP(ctx context.Context) (ip *network.Public
 		network.PublicIPAddress{
 			Name:     to.StringPtr(az.IpName),
 			Location: to.StringPtr(nodeLocation),
+			Sku:      &network.PublicIPAddressSku{Name: "Standard"},
 			PublicIPAddressPropertiesFormat: &network.PublicIPAddressPropertiesFormat{
 				PublicIPAddressVersion:   network.IPv4,
 				PublicIPAllocationMethod: network.Static,
@@ -374,6 +375,11 @@ func (az *AzureProvider) createNIC(ctx context.Context, vnetName, subnetName, ns
 						Subnet:                    &subnet,
 						PrivateIPAllocationMethod: network.Dynamic,
 						PublicIPAddress:           &ip,
+						LoadBalancerBackendAddressPools: &[]network.BackendAddressPool{
+							{
+								ID: az.getWorkerBackendPoolID(),
+							},
+						},
 					},
 				},
 			},
@@ -462,6 +468,13 @@ func (az *AzureProvider) constructStorageProfile(imageId string) (storageProfile
 		},
 	}
 	return storageProfile
+}
+
+// getWorkerBackendPoolID gets the backend pool id of the worker node loadbalancer
+func (az *AzureProvider) getWorkerBackendPoolID() *string {
+	var wbpi = fmt.Sprintf("/subscriptions/%s/resourceGroups/%[2]s-rg/providers/"+
+		"Microsoft.Network/loadBalancers/%[2]s/backendAddressPools/%[2]s", az.subscriptionID, az.infraID)
+	return &wbpi
 }
 
 // randomPasswordString generates random string with restrictions of given length.
