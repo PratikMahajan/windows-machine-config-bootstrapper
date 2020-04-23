@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/profiles/2019-03-01/resources/mgmt/resources"
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-03-01/compute"
 	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2019-04-01/network"
 	"github.com/Azure/go-autorest/autorest"
@@ -78,6 +79,8 @@ type AzureProvider struct {
 	diskClient compute.DisksClient
 	// a request authorization token to supply for clients
 	authorizer autorest.Authorizer
+	//
+	resourcesClient resources.Client
 	// resourceGroupName of the existing openshift cluster.
 	resourceGroupName string
 	// subscriptionID of the corresponding azure service principal.
@@ -143,6 +146,7 @@ func New(openShiftClient *client.OpenShift, credentialPath, subscriptionID,
 	nsgClient := getNsgClient(resourceAuthorizer, subscriptionID)
 	diskClient := getDiskClient(resourceAuthorizer, subscriptionID)
 	rulesClient := getRulesClient(resourceAuthorizer, subscriptionID)
+	resourcesClient := getResourcesClient(resourceAuthorizer, subscriptionID)
 
 	requiredRules, err := constructRequiredRules(rulesClient, resourceGroupName)
 	if err != nil {
@@ -152,7 +156,7 @@ func New(openShiftClient *client.OpenShift, credentialPath, subscriptionID,
 	var IpName, NicName, NsgName string
 
 	return &AzureProvider{vnetClient, vmClient, ipClient,
-		subnetClient, nicClient, nsgClient, diskClient, resourceAuthorizer,
+		subnetClient, nicClient, nsgClient, diskClient, resourceAuthorizer, resourcesClient,
 		resourceGroupName, subscriptionID, infraID, IpName, NicName, NsgName,
 		imageID, instanceType, resourceTrackerDir, requiredRules}, nil
 }
@@ -232,6 +236,12 @@ func getDiskClient(authorizer autorest.Authorizer, subscriptionID string) comput
 	diskClient := compute.NewDisksClient(subscriptionID)
 	diskClient.Authorizer = authorizer
 	return diskClient
+}
+
+func getResourcesClient(authorizer autorest.Authorizer, subscriptionID string) resources.Client {
+	resourcesClient := resources.NewClient(subscriptionID)
+	resourcesClient.Authorizer = authorizer
+	return resourcesClient
 }
 
 // errorCheck checks if there exists an error and returns a bool response
@@ -377,7 +387,7 @@ func (az *AzureProvider) createNIC(ctx context.Context, vnetName, subnetName, ns
 						PublicIPAddress:           &ip,
 						LoadBalancerBackendAddressPools: &[]network.BackendAddressPool{
 							{
-								ID: az.getWorkerBackendPoolID(),
+								ID: az.getWorkerBackendPoolID(ctx),
 							},
 						},
 					},
@@ -471,10 +481,31 @@ func (az *AzureProvider) constructStorageProfile(imageId string) (storageProfile
 }
 
 // getWorkerBackendPoolID gets the backend pool id of the worker node loadbalancer
-func (az *AzureProvider) getWorkerBackendPoolID() *string {
+func (az *AzureProvider) getWorkerBackendPoolID(ctx context.Context) *string {
+
+	az.ListResource(ctx)
+	log.Fatal("error here ")
 	var wbpi = fmt.Sprintf("/subscriptions/%s/resourceGroups/%[2]s-rg/providers/"+
 		"Microsoft.Network/loadBalancers/%[2]s/backendAddressPools/%[2]s", az.subscriptionID, az.infraID)
 	return &wbpi
+}
+
+// GetResource gets a resource, the generic way.
+func (az *AzureProvider) ListResource(ctx context.Context ) (error) {
+	filter := "substringof('worker', name) & resourceType eq 'Microsoft.Network/virtualNetworks'"
+	num := int32(1)
+	list, err :=  az.resourcesClient.List(
+		ctx,
+		filter,
+		"",
+		&num,
+	)
+	if err != nil{
+		log.Fatal("Error getting resource %s", err )
+		return err
+	}
+	log.Printf("list here %s", list.Values())
+	return nil
 }
 
 // randomPasswordString generates random string with restrictions of given length.
