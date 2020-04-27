@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/profiles/2019-03-01/resources/mgmt/resources"
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-03-01/compute"
 	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2019-04-01/network"
 	"github.com/Azure/go-autorest/autorest"
@@ -80,6 +81,8 @@ type AzureProvider struct {
 	nsgClient network.SecurityGroupsClient
 	// diskClient to query for disk related operations.
 	diskClient compute.DisksClient
+	// resourcesClient to query resources
+	resourcesClient resources.Client
 	// a request authorization token to supply for clients
 	authorizer autorest.Authorizer
 	// resourceGroupName of the existing openshift cluster.
@@ -152,6 +155,7 @@ func New(openShiftClient *client.OpenShift, credentialPath, subscriptionID,
 	nsgClient := getNsgClient(resourceAuthorizer, subscriptionID)
 	diskClient := getDiskClient(resourceAuthorizer, subscriptionID)
 	rulesClient := getRulesClient(resourceAuthorizer, subscriptionID)
+	resourcesClient := getResourcesClient(resourceAuthorizer, subscriptionID)
 
 	requiredRules, err := constructRequiredRules(rulesClient, resourceGroupName)
 	if err != nil {
@@ -161,7 +165,7 @@ func New(openShiftClient *client.OpenShift, credentialPath, subscriptionID,
 	var IpName, NicName, NsgName string
 
 	return &AzureProvider{vnetClient, vmClient, ipClient,
-		subnetClient, nicClient, nsgClient, diskClient, resourceAuthorizer,
+		subnetClient, nicClient, nsgClient, diskClient, resourcesClient, resourceAuthorizer,
 		resourceGroupName, subscriptionID, infraID, IpName, NicName, NsgName,
 		imageID, instanceType, resourceTrackerDir, requiredRules}, nil
 }
@@ -241,6 +245,13 @@ func getDiskClient(authorizer autorest.Authorizer, subscriptionID string) comput
 	diskClient := compute.NewDisksClient(subscriptionID)
 	diskClient.Authorizer = authorizer
 	return diskClient
+}
+
+// getResourcesClient gets the resources client by passing the authorizer token.
+func getResourcesClient(authorizer autorest.Authorizer, subscriptionID string) resources.Client {
+	resourcesClient := resources.NewClient(subscriptionID)
+	resourcesClient.Authorizer = authorizer
+	return resourcesClient
 }
 
 // errorCheck checks if there exists an error and returns a bool response
@@ -373,6 +384,11 @@ func (az *AzureProvider) createNIC(ctx context.Context, vnetName, subnetName, ns
 		fmt.Errorf("failed to get ip address: %v", err)
 	}
 
+	workerBackendPoolID, err := az.getWorkerBackendPoolID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worker node backend pool id: %s", err)
+	}
+
 	nicParams := network.Interface{
 		Name:     to.StringPtr(az.NicName),
 		Location: to.StringPtr(nodeLocation),
@@ -388,7 +404,7 @@ func (az *AzureProvider) createNIC(ctx context.Context, vnetName, subnetName, ns
 						// windows vm is expected to be placed behind the worker nodes' Load balancer.
 						LoadBalancerBackendAddressPools: &[]network.BackendAddressPool{
 							{
-								ID: az.getWorkerBackendPoolID(),
+								ID: workerBackendPoolID,
 							},
 						},
 					},
@@ -482,12 +498,63 @@ func (az *AzureProvider) constructStorageProfile(imageId string) (storageProfile
 }
 
 // getWorkerBackendPoolID gets the backend pool id of the worker node loadbalancer
-func (az *AzureProvider) getWorkerBackendPoolID() *string {
-	// We assume that BackendPoolID for worker vm follows the following format
-	// /subscriptions/$SUBSCRIPTID/resourceGroups/$INFRAID-rg/providers/Microsoft.Network/loadBalancers/$INFRAID/backendAddressPools/$INFRAID
-	var wbpi = fmt.Sprintf("/subscriptions/%s/resourceGroups/%[2]s-rg/providers/"+
-		"Microsoft.Network/loadBalancers/%[2]s/backendAddressPools/%[2]s", az.subscriptionID, az.infraID)
-	return &wbpi
+func (az *AzureProvider) getWorkerBackendPoolID(ctx context.Context) (*string, error) {
+	// Create a filter to get a resource of type virtualMachine which contains worker in its name
+	filter := "resourceType eq 'Microsoft.Compute/virtualMachines' and substringof('worker', name)"
+	// number of resources to retrieve
+	// we are retrieving just 1 resource as all the worker nodes have same loadbalancers, any workerVM works for our case
+	num := int32(1)
+	vmResource, err := az.getResource(ctx, filter, num)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worker node: %s", err)
+	}
+	if vmResource == nil {
+		return nil, fmt.Errorf("failed to get worker node VM resource")
+	}
+	// Because we are retrieving just one resource(worker VM) extract the 1st VM ID
+	vmName := extractResourceName(*vmResource[0].ID)
+	err, nicName := az.getNICname(ctx, vmName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get NIC name %s", err)
+	}
+	interfaceStruct, err := az.nicClient.Get(ctx, az.resourceGroupName, nicName, "")
+	if err != nil {
+		return nil, fmt.Errorf("cannot fetch the network interface data of %s: %s", vmName, err)
+	}
+	interfacePropFormat := *(interfaceStruct.InterfacePropertiesFormat)
+	if interfacePropFormat.IPConfigurations == nil {
+		return nil, fmt.Errorf("ip configuration for %s cannot be nil", vmName)
+	}
+	interfaceIPConfigs := *(interfacePropFormat.IPConfigurations)
+	if interfaceIPConfigs == nil {
+		return nil, fmt.Errorf("ip configuration properties for %s cannot be nil", vmName)
+	}
+	// we assume that all worker nodes have only one IP config.
+	ipConfigProp := *(interfaceIPConfigs[0].InterfaceIPConfigurationPropertiesFormat)
+	if ipConfigProp.LoadBalancerBackendAddressPools == nil {
+		return nil, fmt.Errorf("load balancer backend address pools for %s cannot be nil", vmName)
+	}
+	backendPools := *(ipConfigProp.LoadBalancerBackendAddressPools)
+	if backendPools == nil {
+		return nil, fmt.Errorf("backend address pool id for %s cannot be nil", vmName)
+	}
+	// we assume that all the worker nodes have only one backend pool associated. get the ID of backend pool
+	workerBackendPoolID := *(backendPools[0].ID)
+	return &workerBackendPoolID, nil
+}
+
+// getResource gets a resource, the generic way.
+func (az *AzureProvider) getResource(ctx context.Context, filter string, num int32) ([]resources.GenericResource, error) {
+	list, err := az.resourcesClient.List(
+		ctx,
+		filter,
+		"",
+		&num,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get resources for filter %s: %s", filter, err)
+	}
+	return list.Values(), nil
 }
 
 // randomPasswordString generates random string with restrictions of given length.

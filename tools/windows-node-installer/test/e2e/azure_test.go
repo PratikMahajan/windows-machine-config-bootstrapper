@@ -10,12 +10,15 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 
+	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/to"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-03-01/compute"
 	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2019-04-01/network"
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/azure/auth"
@@ -71,8 +74,16 @@ type requiredRule struct {
 type azureProvider struct {
 	// resourceGroupName of the Windows node
 	resourceGroupName string
+	// subscriptionID of the corresponding azure service principal.
+	subscriptionID string
+	// infraID is the name of existing openshift infrastructure.
+	infraID string
 	// nsgClient to check if winRmHttps port is opened or not.
 	nsgClient network.SecurityGroupsClient
+	// vmClient to query for instance related operations.
+	vmClient compute.VirtualMachinesClient
+	// nicClient to query for nic related operations.
+	nicClient network.InterfacesClient
 	// requiredRules is the set of SG rules that need to be created or deleted
 	requiredRules map[string]*requiredRule
 }
@@ -106,6 +117,7 @@ func TestCreateVM(t *testing.T) {
 	t.Run("check if ansible is able to ping on the WinRmHttps port", testAnsiblePing)
 	t.Run("check if container logs port is open in Windows firewall", testAzureInstancesFirewallRule)
 	t.Run("check if SSH connection is available", testAzureSSHConnection)
+	t.Run("check if VM LB is same as Worker LB", testAzureVMLoadbalancer)
 }
 
 // isNil is a helper functions which checks if the object is a nil pointer or not.
@@ -175,6 +187,13 @@ func populateAzureInfo() error {
 	if subscriptionId == "" {
 		return fmt.Errorf("failed to get the subscriptionId from AZURE_AUTH_LOCATION: %s", azureCredentials)
 	}
+	azureInfo.subscriptionID = subscriptionId
+
+	infraID, err := oc.GetInfrastructureID()
+	if err != nil {
+		return fmt.Errorf("failed to get the infraID from OpenShift client: %s", err)
+	}
+	azureInfo.infraID = infraID
 
 	// instantiate network security group client.
 	azureInfo.nsgClient = network.NewSecurityGroupsClient(subscriptionId)
@@ -185,6 +204,14 @@ func populateAzureInfo() error {
 		return fmt.Errorf("failed to get azure authorization token with error: %v", err)
 	}
 	azureInfo.nsgClient.Authorizer = resourceAuthorizer
+
+	// initiate the virtual machine client
+	vmClient := getVMClient(resourceAuthorizer, subscriptionId)
+	azureInfo.vmClient = vmClient
+
+	// initiate the network interface card client
+	nicClient := getNicClient(resourceAuthorizer, subscriptionId)
+	azureInfo.nicClient = nicClient
 
 	requiredRules, err := constructRequiredRules()
 	if err != nil {
@@ -239,6 +266,43 @@ func readInstallerInfo() (err error) {
 	}
 	instanceIDs = installerInfo.InstanceIDs
 	return nil
+}
+
+// getVMClient gets the Virtual Machine Client by passing the authorizer token.
+func getVMClient(authorizer autorest.Authorizer, subscriptionID string) compute.VirtualMachinesClient {
+	vmClient := compute.NewVirtualMachinesClient(subscriptionID)
+	vmClient.Authorizer = authorizer
+	return vmClient
+}
+
+// getNicClient gets the NIC Client by passing the authorizer token.
+func getNicClient(authorizer autorest.Authorizer, subscriptionID string) network.InterfacesClient {
+	nicClient := network.NewInterfacesClient(subscriptionID)
+	nicClient.Authorizer = authorizer
+	return nicClient
+}
+
+// getNICname returns nicName by taking instance name as an argument.
+func (az *azureProvider) getNICname(ctx context.Context, vmName string) (err error, nicName string) {
+	vmStruct, err := az.vmClient.Get(ctx, az.resourceGroupName, vmName, "instanceView")
+	if err != nil {
+		return fmt.Errorf("cannot fetch the instance data of %s: %s", vmName, err), ""
+	}
+	networkProfile := vmStruct.VirtualMachineProperties.NetworkProfile
+	networkInterface := (*networkProfile.NetworkInterfaces)[0]
+	nicID := *networkInterface.ID
+	nicName = extractResourceName(nicID)
+	return nil, nicName
+}
+
+// extractResourceName captures the resource name omitting the other details.
+// for ex: /subscriptions/.../resourcegroups/ExampleResourceGroup?api-version=2016-02-01/vnetName/somesamplevnetName
+// we need to extract the vnetName from the above input.
+func extractResourceName(rawresource string) (name string) {
+	resultList := strings.Split(rawresource, "/")
+	arrayLength := len(resultList)
+	name = resultList[arrayLength-1]
+	return
 }
 
 // areRequiredRulesPresent returns true if all the required rules are present in the SecurityRule slice
@@ -398,4 +462,50 @@ func testAzureSSHConnection(t *testing.T) {
 	require.NoErrorf(t, err, "failed to create SSH session")
 	err = session.Run("dir")
 	require.NoErrorf(t, err, "failed to communicate vis SSH")
+}
+
+// test if the windows VM is behind the worker node load balancer
+func testAzureVMLoadbalancer(t *testing.T) {
+	// We assume that BackendPoolID for worker vm follows the following format
+	// /subscriptions/$SUBSCRIPTID/resourceGroups/$INFRAID-rg/providers/Microsoft.Network/loadBalancers/$INFRAID/backendAddressPools/$INFRAID
+	var workerBackendPoolID = fmt.Sprintf("/subscriptions/%s/resourceGroups/%[2]s-rg/providers/"+
+		"Microsoft.Network/loadBalancers/%[2]s/backendAddressPools/%[2]s", azureInfo.subscriptionID, azureInfo.infraID)
+
+	ctx := context.Background()
+	for _, vmName := range instanceIDs {
+		err, nicName := azureInfo.getNICname(ctx, vmName)
+		if err != nil {
+			t.Fatalf("failed to get NIC name: %s", err)
+		}
+		interfaceStruct, err := azureInfo.nicClient.Get(ctx, azureInfo.resourceGroupName, nicName, "")
+		if err != nil {
+			t.Fatalf("cannot fetch the network interface data of %s", vmName)
+		}
+		if interfaceStruct.InterfacePropertiesFormat == nil {
+			t.Fatalf("interface properties cannot be nil for VM %s", vmName)
+		}
+		interfacePropFormat := *(interfaceStruct.InterfacePropertiesFormat)
+		if interfacePropFormat.IPConfigurations == nil {
+			t.Fatalf("ip configurations cannot be nil for VM %s", vmName)
+		}
+		interfaceIPConfigs := *(interfacePropFormat.IPConfigurations)
+		if interfaceIPConfigs == nil {
+			t.Fatalf("ip configuration properties cannot be nil for VM %s", vmName)
+		}
+		// we assume that the windows VM node have only one IP config attached.
+		ipConfigProp := *(interfaceIPConfigs[0].InterfaceIPConfigurationPropertiesFormat)
+		if ipConfigProp.LoadBalancerBackendAddressPools == nil {
+			t.Fatalf("load balancer address pools cannot be nil for VM %s", vmName)
+		}
+		backendPools := *(ipConfigProp.LoadBalancerBackendAddressPools)
+		if backendPools == nil {
+			t.Fatalf("backend pool id cannot be nil for VM %s", vmName)
+		}
+		// we assume that all the Windows VM node have only one backend pool associated
+		// get the ID of backend pool associated with the VM
+		vmBackendPoolID := *(backendPools[0].ID)
+		assert.Equal(t, workerBackendPoolID, vmBackendPoolID, "backendPoolIDs of windows node: %s and worker "+
+			"nodes should match", vmName)
+	}
+
 }
