@@ -384,7 +384,7 @@ func (az *AzureProvider) createNIC(ctx context.Context, vnetName, subnetName, ns
 		fmt.Errorf("failed to get ip address: %v", err)
 	}
 
-	workerBackendPoolID, err := az.getWorkerBackendPoolID(ctx)
+	workerBackendPools, err := az.getWorkerBackendPool(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get worker node backend pool id: %s", err)
 	}
@@ -402,11 +402,7 @@ func (az *AzureProvider) createNIC(ctx context.Context, vnetName, subnetName, ns
 						PublicIPAddress:           &ip,
 						// In Azure, for egress as well as for Load balancer service to work, the
 						// windows vm is expected to be placed behind the worker nodes' Load balancer.
-						LoadBalancerBackendAddressPools: &[]network.BackendAddressPool{
-							{
-								ID: workerBackendPoolID,
-							},
-						},
+						LoadBalancerBackendAddressPools: &workerBackendPools,
 					},
 				},
 			},
@@ -497,59 +493,98 @@ func (az *AzureProvider) constructStorageProfile(imageId string) (storageProfile
 	return storageProfile
 }
 
-// getWorkerBackendPoolID gets the backend pool id of the worker node loadbalancer
-func (az *AzureProvider) getWorkerBackendPoolID(ctx context.Context) (*string, error) {
+// getWorkerBackendPoolID gets the backend pool id of all the worker node loadbalancers
+func (az *AzureProvider) getWorkerBackendPool(ctx context.Context) ([]network.BackendAddressPool, error) {
 	// Create a filter to get a resource of type virtualMachine which contains worker in its name
 	filter := "resourceType eq 'Microsoft.Compute/virtualMachines' and substringof('worker', name)"
 	// number of resources to retrieve
-	// we are retrieving just 1 resource as all the worker nodes have same loadbalancers, any workerVM works for our case
-	num := int32(1)
-	vmResource, err := az.getResource(ctx, filter, num)
+	// https://learnk8s.io/kubernetes-node-size
+	// Kubernetes can technically accommodate 5000 nodes, considering that for optimal performance organizations limit at 500 worker nodes
+	top := int32(500)
+	vmResources, err := az.getResource(ctx, filter, top)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get worker node: %s", err)
 	}
-	if vmResource == nil {
+	if vmResources == nil {
 		return nil, fmt.Errorf("failed to get worker node VM resource")
 	}
-	// Because we are retrieving just one resource(worker VM) extract the 1st VM ID
-	vmName := extractResourceName(*vmResource[0].ID)
-	err, nicName := az.getNICname(ctx, vmName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get NIC name %s", err)
+
+	// create a map to keep track of all the loadbalancers associated with the worker nodes.
+	lbSet := make(map[string]struct{})
+	// filler value for map
+	var exists = struct{}{}
+
+	// Iterate over all the vm resources and get the worker backend pools attached to all the resources.
+	for _, vmResource := range vmResources {
+		vmName := extractResourceName(*vmResource.ID)
+		err, nicName := az.getNICname(ctx, vmName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get NIC name %s", err)
+		}
+
+		interfaceStruct, err := az.nicClient.Get(ctx, az.resourceGroupName, nicName, "")
+		if err != nil {
+			return nil, fmt.Errorf("cannot fetch the network interface data of %s: %s", vmName, err)
+		}
+
+		if interfaceStruct.InterfacePropertiesFormat == nil {
+			return nil, fmt.Errorf("ip configuration for %s cannot be nil", vmName)
+		}
+		interfacePropFormat := *(interfaceStruct.InterfacePropertiesFormat)
+
+		if interfacePropFormat.IPConfigurations == nil {
+			return nil, fmt.Errorf("ip configuration for %s cannot be nil", vmName)
+		}
+		interfaceIPConfigs := *(interfacePropFormat.IPConfigurations)
+
+		if interfaceIPConfigs == nil {
+			return nil, fmt.Errorf("ip configuration properties for %s cannot be nil", vmName)
+		}
+		// // we assume that all worker nodes have only one IP config.
+		//if len(interfaceIPConfigs) > 1 {
+		//	return nil, fmt.Errorf("multiple interface ip configs are not supported for VM %s", vmName)
+		//}
+
+		// Iterate over all the IP configs attached to the worker node
+		for _, ipConf := range interfaceIPConfigs {
+			if ipConf.InterfaceIPConfigurationPropertiesFormat == nil {
+				return nil, fmt.Errorf("unable to get ip configuration properties for VM %s ", vmName)
+			}
+			ipConfigProp := *(ipConf.InterfaceIPConfigurationPropertiesFormat)
+			if ipConfigProp.LoadBalancerBackendAddressPools == nil {
+				return nil, fmt.Errorf("load balancer backend address pools for %s cannot be nil", vmName)
+			}
+			backendPools := *(ipConfigProp.LoadBalancerBackendAddressPools)
+			if backendPools == nil || len(backendPools) < 1 {
+				return nil, fmt.Errorf("backend address pool id for %s cannot be nil", vmName)
+			}
+			// get all the backendAddressPools attached to the IP config
+			for _, pools := range backendPools {
+				lbSet[*pools.ID] = exists
+			}
+		}
 	}
-	interfaceStruct, err := az.nicClient.Get(ctx, az.resourceGroupName, nicName, "")
-	if err != nil {
-		return nil, fmt.Errorf("cannot fetch the network interface data of %s: %s", vmName, err)
+
+	// create an array of all the backend address pools that are attached to worker nodes
+	// which will then be applied to the windows node
+	var lbBackendPoolIDs []network.BackendAddressPool
+	for workerBackendPoolID, _ := range lbSet {
+		backendAddressPool := network.BackendAddressPool{
+			ID: &workerBackendPoolID,
+		}
+		lbBackendPoolIDs = append(lbBackendPoolIDs, backendAddressPool)
 	}
-	interfacePropFormat := *(interfaceStruct.InterfacePropertiesFormat)
-	if interfacePropFormat.IPConfigurations == nil {
-		return nil, fmt.Errorf("ip configuration for %s cannot be nil", vmName)
-	}
-	interfaceIPConfigs := *(interfacePropFormat.IPConfigurations)
-	if interfaceIPConfigs == nil {
-		return nil, fmt.Errorf("ip configuration properties for %s cannot be nil", vmName)
-	}
-	// we assume that all worker nodes have only one IP config.
-	ipConfigProp := *(interfaceIPConfigs[0].InterfaceIPConfigurationPropertiesFormat)
-	if ipConfigProp.LoadBalancerBackendAddressPools == nil {
-		return nil, fmt.Errorf("load balancer backend address pools for %s cannot be nil", vmName)
-	}
-	backendPools := *(ipConfigProp.LoadBalancerBackendAddressPools)
-	if backendPools == nil {
-		return nil, fmt.Errorf("backend address pool id for %s cannot be nil", vmName)
-	}
-	// we assume that all the worker nodes have only one backend pool associated. get the ID of backend pool
-	workerBackendPoolID := *(backendPools[0].ID)
-	return &workerBackendPoolID, nil
+
+	return lbBackendPoolIDs, nil
 }
 
 // getResource gets a resource, the generic way.
-func (az *AzureProvider) getResource(ctx context.Context, filter string, num int32) ([]resources.GenericResource, error) {
+func (az *AzureProvider) getResource(ctx context.Context, filter string, top int32) ([]resources.GenericResource, error) {
 	list, err := az.resourcesClient.List(
 		ctx,
 		filter,
 		"",
-		&num,
+		&top,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get resources for filter %s: %s", filter, err)
