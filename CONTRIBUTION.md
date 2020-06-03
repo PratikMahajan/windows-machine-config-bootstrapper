@@ -4,11 +4,6 @@ Windows Machine Config Operator is Apache 2.0 licensed and accepts contributions
 document outlines some of the conventions on commit message formatting, instructions on how to set up a dev
 environment, and other resources to help get contributions into the project.  
 
-## Setting up a dev environment
-
-- Fork the repository on GitHub
-- Clone the forked repository in your go path.
-
 ## Reporting bugs and creating issues
 
 If any part of the project has bugs or documentation mistakes, please let us know by opening a
