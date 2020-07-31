@@ -16,7 +16,7 @@ import (
 
 	"github.com/openshift/windows-machine-config-bootstrapper/internal/test"
 	e2ef "github.com/openshift/windows-machine-config-bootstrapper/internal/test/framework"
-	"github.com/openshift/windows-machine-config-bootstrapper/tools/windows-node-installer/pkg/types"
+	"github.com/openshift/windows-machine-config-bootstrapper/internal/test/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	certificates "k8s.io/api/certificates/v1beta1"

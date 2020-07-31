@@ -1,15 +1,22 @@
 package framework
 
 import (
+	"context"
 	"fmt"
 	"io"
+	core "k8s.io/api/core/v1"
 	"log"
 	"os"
 	"path/filepath"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"strings"
 	"time"
 
-	"github.com/openshift/windows-machine-config-bootstrapper/tools/windows-node-installer/pkg/cloudprovider"
-	"github.com/openshift/windows-machine-config-bootstrapper/tools/windows-node-installer/pkg/types"
+	mapi "github.com/openshift/machine-api-operator/pkg/apis/machine/v1beta1"
+	"github.com/openshift/windows-machine-config-bootstrapper/internal/test/types"
+	"github.com/openshift/windows-machine-config-operator/test/e2e/providers"
 	"github.com/pkg/sftp"
 )
 
@@ -21,7 +28,7 @@ const (
 // cloudProvider holds the information related to cloud provider
 // TODO: Move this to proper location which can destroy the VM that got created.
 //		https://issues.redhat.com/browse/WINC-245
-var cloudProvider cloudprovider.Cloud
+var cloudProvider providers.CloudProvider
 
 // testWindowsVM holds the information related to the test Windows VM. This should hold the specialized information
 // related to test suite.
@@ -51,25 +58,112 @@ type TestWindowsVM interface {
 	types.WindowsVM
 }
 
+//
+func createMachineSet() error {
+	cloudProvider, err := providers.NewCloudProvider(sshKey)
+	if err != nil {
+		return fmt.Errorf("error instantiating cloud provider %v", err)
+	}
+	_, err = cloudProvider.GenerateMachineSet(true, 1)
+	if err != nil {
+		return fmt.Errorf("error creating Windows MachineSet: %v", err)
+	}
+	return nil
+}
+
+//
+func waitForMachines() ([]mapi.Machine, error) {
+	cfg, err := config.GetConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	k8c, err := client.New(cfg, client.Options{})
+	if err != nil {
+		return nil, err
+	}
+	windowsOSLabel := "node.openshift.io/os-id"
+	var provisionedMachines []mapi.Machine
+	timeOut := 2 * time.Minute
+	startTime := time.Now()
+	requiredVMCount := 1
+	for i := 0; time.Since(startTime) <= timeOut; i++ {
+		allMachines := &mapi.MachineList{}
+
+		err := k8c.List(context.TODO(), allMachines, client.InNamespace("openshift-machine-api"), client.HasLabels{windowsOSLabel})
+		if err != nil {
+			return nil, fmt.Errorf("failed to list machines: %v", err)
+		}
+
+		provisionedMachines = []mapi.Machine{}
+
+		phaseProvisioned := "Provisioned"
+
+		for machine := range allMachines.Items {
+			instanceStatus := allMachines.Items[machine].Status
+			if instanceStatus.Phase == nil {
+				continue
+			}
+			instancePhase := *instanceStatus.Phase
+			if instancePhase == phaseProvisioned {
+				provisionedMachines = append(provisionedMachines, allMachines.Items[machine])
+			}
+		}
+		time.Sleep(5 * time.Second)
+	}
+	if requiredVMCount == len(provisionedMachines) {
+		return provisionedMachines, nil
+	}
+	return nil, fmt.Errorf("expected event count %d but got %d", requiredVMCount, len(provisionedMachines))
+}
+
 // newWindowsVM creates and sets up a Windows VM in the cloud and returns the WindowsVM interface that can be used to
 // interact with the VM. If credentials are passed then it is assumed that VM already exists in the cloud and those
 // credentials will be used to interact with the VM. If no error is returned then it is guaranteed that the VM was
 // created and can be interacted with. If skipSetup is true, then configuration steps are skipped.
-func newWindowsVM(imageID, instanceType string, credentials *types.Credentials, skipSetup bool) (TestWindowsVM, error) {
+func newWindowsVM(credentials *types.Credentials, skipSetup bool) (TestWindowsVM, error) {
 	w := &testWindowsVM{}
-	var err error
 
-	cloudProvider, err = cloudprovider.CloudProviderFactory(kubeconfig, awsCredentials, "default", artifactDir,
-		imageID, instanceType, sshKey, privateKeyPath)
+	err := createMachineSet()
 	if err != nil {
-		return nil, fmt.Errorf("error instantiating cloud provider %v", err)
+		return nil, fmt.Errorf("unable to create Windows MachineSet: %v", err)
+	}
+
+	provisionedMachines, err := waitForMachines()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, machine := range provisionedMachines {
+		ipAddress := ""
+		for _, address := range machine.Status.Addresses {
+			if address.Type == core.NodeInternalIP {
+				ipAddress = address.Address
+			}
+		}
+		if len(ipAddress) == 0 {
+			return nil, fmt.Errorf("no associated internal ip for machine: %s", machine.Name)
+		}
+
+		// Get the instance ID associated with the Windows machine.
+		providerID := *machine.Spec.ProviderID
+		if len(providerID) == 0 {
+			return nil, fmt.Errorf("no provider id associated with machine")
+		}
+		// Ex: aws:///us-east-1e/i-078285fdadccb2eaa. We always want the last entry which is the instanceID
+		providerTokens := strings.Split(providerID, "/")
+		instanceID := providerTokens[len(providerTokens)-1]
+		if len(instanceID) == 0 {
+			return nil, fmt.Errorf("empty instance id in provider id")
+		}
+
 	}
 
 	if credentials == nil {
-		windowsVM, err := cloudProvider.CreateWindowsVM()
-		if err != nil {
-			return nil, fmt.Errorf("error creating Windows VM: %v", err)
-		}
+		// create windows machine set
+
+		// wait for machines to enter provisioned state
+
 		// TypeAssert to the WindowsVM struct we want
 		winVM, ok := windowsVM.(*types.Windows)
 		if !ok {
@@ -78,16 +172,13 @@ func newWindowsVM(imageID, instanceType string, credentials *types.Credentials, 
 		w.Windows = winVM
 	} else {
 		//TODO: Add username as well, as it will change depending on cloud provider
-		if credentials.GetIPAddress() == "" || credentials.GetPassword() == "" {
-			return nil, fmt.Errorf("password or IP address not specified in credentials")
+		if credentials.GetIPAddress() == "" || credentials.GetSSHKey() == "" {
+			return nil, fmt.Errorf("sshkey or IP address not specified in credentials")
 		}
 		w.Windows = &types.Windows{}
 		w.Credentials = credentials
 	}
 
-	if err := w.SetupWinRMClient(); err != nil {
-		return w, fmt.Errorf("failed to setup winRM client for the Windows VM: %v", err)
-	}
 	// Wait for some time before starting configuring of ssh server. This is to let sshd service be available
 	// in the list of services
 	// TODO: Parse the output of the `Get-Service sshd, ssh-agent` on the Windows node to check if the windows nodes

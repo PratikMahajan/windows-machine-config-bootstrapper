@@ -16,7 +16,7 @@ import (
 	"github.com/google/go-github/v29/github"
 	configclient "github.com/openshift/client-go/config/clientset/versioned"
 	operatorv1 "github.com/openshift/client-go/operator/clientset/versioned/typed/operator/v1"
-	"github.com/openshift/windows-machine-config-bootstrapper/tools/windows-node-installer/pkg/types"
+	"github.com/openshift/windows-machine-config-bootstrapper/internal/test/types"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -152,7 +152,7 @@ func (f *TestFramework) Setup(vmCount int, credentials []*types.Credentials, ski
 			creds = credentials[i]
 		}
 		// Pass an empty imageID so that WNI will use the latest Windows image
-		f.WinVMs[i], err = newWindowsVM("", instanceType, creds, skipVMsetup)
+		f.WinVMs[i], err = newWindowsVM(, creds, skipVMsetup)
 		if err != nil {
 			return fmt.Errorf("unable to instantiate Windows VM: %v", err)
 		}
