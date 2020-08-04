@@ -3,6 +3,7 @@ package framework
 import (
 	"context"
 	"fmt"
+	"golang.org/x/crypto/ssh"
 	"io"
 	core "k8s.io/api/core/v1"
 	"log"
@@ -10,7 +11,6 @@ import (
 	"path/filepath"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"strings"
 	"time"
 
@@ -64,15 +64,33 @@ func createMachineSet() error {
 	if err != nil {
 		return fmt.Errorf("error instantiating cloud provider %v", err)
 	}
-	_, err = cloudProvider.GenerateMachineSet(true, 1)
+	machineSet, err := cloudProvider.GenerateMachineSet(true, 1)
 	if err != nil {
 		return fmt.Errorf("error creating Windows MachineSet: %v", err)
 	}
+	cfg, err := config.GetConfig()
+	if err != nil {
+		return fmt.Errorf("did not create ms %v", err)
+	}
+
+	k8c, err := client.New(cfg, client.Options{})
+	if err != nil {
+		return fmt.Errorf("did not create ms %v", err)
+	}
+	log.Print("Creating Machine Sets")
+	err = k8c.Create(context.TODO(), machineSet)
+	if err != nil {
+		log.Print("%v", err)
+		return fmt.Errorf("did not create ms %v", err)
+	}
+	log.Print("Created Machine Sets")
+
 	return nil
 }
 
 //
 func waitForMachines() ([]mapi.Machine, error) {
+	log.Print("Waiting for Machine Sets ")
 	cfg, err := config.GetConfig()
 	if err != nil {
 		return nil, err
@@ -121,9 +139,8 @@ func waitForMachines() ([]mapi.Machine, error) {
 // interact with the VM. If credentials are passed then it is assumed that VM already exists in the cloud and those
 // credentials will be used to interact with the VM. If no error is returned then it is guaranteed that the VM was
 // created and can be interacted with. If skipSetup is true, then configuration steps are skipped.
-func newWindowsVM(credentials *types.Credentials, skipSetup bool) (TestWindowsVM, error) {
-	w := &testWindowsVM{}
-
+func newWindowsVM(vmCount int, credentials *types.Credentials, sshKey ssh.Signer) ([]TestWindowsVM, error) {
+	w := make([]TestWindowsVM, vmCount)
 	err := createMachineSet()
 	if err != nil {
 		return nil, fmt.Errorf("unable to create Windows MachineSet: %v", err)
@@ -134,7 +151,10 @@ func newWindowsVM(credentials *types.Credentials, skipSetup bool) (TestWindowsVM
 		return nil, err
 	}
 
-	for _, machine := range provisionedMachines {
+	log.Print("%v", provisionedMachines)
+	for i, machine := range provisionedMachines {
+		winVM := &testWindowsVM{}
+
 		ipAddress := ""
 		for _, address := range machine.Status.Addresses {
 			if address.Type == core.NodeInternalIP {
@@ -156,42 +176,41 @@ func newWindowsVM(credentials *types.Credentials, skipSetup bool) (TestWindowsVM
 		if len(instanceID) == 0 {
 			return nil, fmt.Errorf("empty instance id in provider id")
 		}
+		winVM.Credentials = types.NewCredentials(instanceID, ipAddress, types.Username)
+		winVM.Credentials.SetSSHKey(sshKey)
+		if err := winVM.GetSSHClient(); err != nil {
+			return nil, fmt.Errorf("unable to get ssh client for vm %s : %v", instanceID, err)
+		}
+		if err := winVM.SetupWinRMClient(); err != nil {
+			return nil, fmt.Errorf("unable to setup winRM client for vm %s : %v", instanceID, err)
+		}
 
+		w[i] = winVM
 	}
 
-	if credentials == nil {
-		// create windows machine set
+	//if credentials == nil {
+	//	// create windows machine set
+	//
+	//	// wait for machines to enter provisioned state
+	//
+	//	// TypeAssert to the WindowsVM struct we want
+	//	winVM, ok := windowsVM.(*types.Windows)
+	//	if !ok {
+	//		return nil, fmt.Errorf("error asserting Windows VM: %v", err)
+	//	}
+	//	w.Windows = winVM
+	//} else {
+	//	//TODO: Add username as well, as it will change depending on cloud provider
+	//	// TODO: get ssh key from userdata secret
+	//	if credentials.GetIPAddress() == "" || credentials.GetSSHKey() == "" {
+	//		return nil, fmt.Errorf("sshkey or IP address not specified in credentials")
+	//	}
+	//	w.Windows = &types.Windows{}
+	//	w.Credentials = credentials
+	//}
 
-		// wait for machines to enter provisioned state
-
-		// TypeAssert to the WindowsVM struct we want
-		winVM, ok := windowsVM.(*types.Windows)
-		if !ok {
-			return nil, fmt.Errorf("error asserting Windows VM: %v", err)
-		}
-		w.Windows = winVM
-	} else {
-		//TODO: Add username as well, as it will change depending on cloud provider
-		if credentials.GetIPAddress() == "" || credentials.GetSSHKey() == "" {
-			return nil, fmt.Errorf("sshkey or IP address not specified in credentials")
-		}
-		w.Windows = &types.Windows{}
-		w.Credentials = credentials
-	}
-
-	// Wait for some time before starting configuring of ssh server. This is to let sshd service be available
-	// in the list of services
 	// TODO: Parse the output of the `Get-Service sshd, ssh-agent` on the Windows node to check if the windows nodes
 	// has those services present
-	if !skipSetup {
-		time.Sleep(time.Minute)
-		if err := w.ConfigureOpenSSHServer(); err != nil {
-			return w, fmt.Errorf("failed to configure OpenSSHServer on the Windows VM: %v", err)
-		}
-	}
-	if err := w.GetSSHClient(); err != nil {
-		return w, fmt.Errorf("failed to get ssh client for the Windows VM created: %v", err)
-	}
 
 	return w, nil
 }
@@ -271,7 +290,8 @@ func (w *testWindowsVM) Destroy() error {
 	if cloudProvider == nil || w.Windows == nil || w.GetCredentials() == nil {
 		return nil
 	}
-	return cloudProvider.DestroyWindowsVMs()
+	//return cloudProvider.DestroyWindowsVMs()
+	return nil
 }
 
 func (w *testWindowsVM) BuildWMCB() bool {

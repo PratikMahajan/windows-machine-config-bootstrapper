@@ -3,6 +3,7 @@ package framework
 import (
 	"context"
 	"fmt"
+	"golang.org/x/crypto/ssh"
 	"io/ioutil"
 	"log"
 	"net/url"
@@ -18,10 +19,14 @@ import (
 	operatorv1 "github.com/openshift/client-go/operator/clientset/versioned/typed/operator/v1"
 	"github.com/openshift/windows-machine-config-bootstrapper/internal/test/types"
 	v1 "k8s.io/api/core/v1"
+	k8sapierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubeTypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	cfg "sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 const (
@@ -30,10 +35,7 @@ const (
 	// RetryInterval is the interval of time until we retry after a failure
 	RetryInterval = 5 * time.Second
 	// WindowsLabel represents the node label that need to be applied to the Windows node created
-	WindowsLabel = "node.openshift.io/os_id=Windows"
-
-	// awsUsername is the default windows username on AWS
-	awsUsername = "Administrator"
+	WindowsLabel = "node.openshift.io/os-id=Windows"
 	// remoteLogPath is the directory where all the log files related to components that we need are generated on the
 	// Windows VM
 	remoteLogPath = "C:\\var\\log\\"
@@ -48,6 +50,8 @@ var (
 	artifactDir string
 	// privateKeyPath is the path to the key that will be used to retrieve the password of each Windows VM
 	privateKeyPath string
+	// Creds is used for parsing the vmCreds command line argument
+	Creds types.Credentials
 )
 
 // TestFramework holds the info to run the test suite.
@@ -73,35 +77,10 @@ type TestFramework struct {
 	// clusterAddress is the address of the OpenShift cluster e.g. "foo.fah.com".
 	// This should not include "https://api-" or a port.
 	ClusterAddress string
-}
-
-// Creds is used for parsing the vmCreds command line argument
-type Creds []*types.Credentials
-
-// Set populates the list of credentials from the vmCreds command line argument
-func (c *Creds) Set(value string) error {
-	if value == "" {
-		return nil
-	}
-
-	splitValue := strings.Split(value, ",")
-	// Credentials consists of three elements, so this has to be
-	if len(splitValue)%3 != 0 {
-		return fmt.Errorf("incomplete VM credentials provided")
-	}
-
-	// TODO: Add input validation if we want to use this in production
-	// TODO: Change username based on cloud provider if this is to be used for clouds other than AWS
-	for i := 0; i < len(splitValue); i += 3 {
-		cred := types.NewCredentials(splitValue[i], splitValue[i+1], splitValue[i+2], awsUsername)
-		*c = append(*c, cred)
-	}
-	return nil
-}
-
-// String returns the string representation of Creds. This is required for Creds to be used with flags.
-func (c *Creds) String() string {
-	return fmt.Sprintf("%v", *c)
+	// Signer is a signer created from the user's private key
+	Signer ssh.Signer
+	//
+	client client.Client
 }
 
 // initCIvars gathers the values of the environment variables which configure the test suite
@@ -128,34 +107,16 @@ func initCIvars() error {
 // Setup creates and initializes a variable amount of Windows VMs. If the array of credentials are passed then it will
 // be used in lieu of creating new VMs. If skipVMsetup is true then it will result in the VM setup not being run. These
 // two options are mainly used during test development.
-func (f *TestFramework) Setup(vmCount int, credentials []*types.Credentials, skipVMsetup bool) error {
-	if credentials != nil {
-		if len(credentials) != vmCount {
-			return fmt.Errorf("vmCount %d does not match length %d of credentials", vmCount, len(credentials))
-		}
-		f.noTeardown = true
-	}
+func (f *TestFramework) Setup(vmCount int, credentials *types.Credentials, skipVMsetup bool) error {
+	//if credentials != nil {
+	//	if len(credentials) != vmCount {
+	//		return fmt.Errorf("vmCount %d does not match length %d of credentials", vmCount, len(credentials))
+	//	}
+	//	f.noTeardown = true
+	//}
 
 	if err := initCIvars(); err != nil {
 		return fmt.Errorf("unable to initialize CI variables: %v", err)
-	}
-
-	f.WinVMs = make([]TestWindowsVM, vmCount)
-	// Using an AMD instance type, as the Windows hybrid overlay currently does not work on on machines using
-	// the Intel 82599 network driver
-	instanceType := "m5a.large"
-	// TODO: make them run in parallel: https://issues.redhat.com/browse/WINC-178
-	for i := 0; i < vmCount; i++ {
-		var err error
-		var creds *types.Credentials
-		if credentials != nil {
-			creds = credentials[i]
-		}
-		// Pass an empty imageID so that WNI will use the latest Windows image
-		f.WinVMs[i], err = newWindowsVM(, creds, skipVMsetup)
-		if err != nil {
-			return fmt.Errorf("unable to instantiate Windows VM: %v", err)
-		}
 	}
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
@@ -176,6 +137,26 @@ func (f *TestFramework) Setup(vmCount int, credentials []*types.Credentials, ski
 	if err := f.getLatestCniPluginsVersion(); err != nil {
 		return fmt.Errorf("unable to get latest 0.8.x version of CNI Plugins: %v", err)
 	}
+
+	cfg, err := cfg.GetConfig()
+	if err != nil {
+		return err
+	}
+	f.client, err = client.New(cfg, client.Options{})
+	if err != nil {
+		return err
+	}
+
+	if err := f.createSigner(); err != nil {
+		return fmt.Errorf("unable to create ssh signer: %v", err)
+	}
+
+	if err := f.createUserDataSecret(); err != nil {
+		return fmt.Errorf("unable to create user data secret: %v", err)
+	}
+
+	// TODO: make them run in parallel: https://issues.redhat.com/browse/WINC-178
+	f.WinVMs, _ = newWindowsVM(vmCount, credentials, f.Signer)
 	return nil
 }
 
@@ -346,7 +327,7 @@ func (f *TestFramework) GetReleaseArtifactSHA(artifactName string) (string, erro
 func (f *TestFramework) GetNode(externalIP string) (*v1.Node, error) {
 	var matchedNode *v1.Node
 
-	nodes, err := f.K8sclientset.CoreV1().Nodes().List(metav1.ListOptions{})
+	nodes, err := f.K8sclientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("could not get list of nodes")
 	}
@@ -458,7 +439,7 @@ func (f *TestFramework) waitUntilHybridOverlayReady() error {
 // timeout limit has been reached.
 func (f *TestFramework) waitUntilOVNPodsReady() error {
 	for i := 0; i < RetryCount; i++ {
-		pods, err := f.K8sclientset.CoreV1().Pods("openshift-ovn-kubernetes").List(metav1.ListOptions{})
+		pods, err := f.K8sclientset.CoreV1().Pods("openshift-ovn-kubernetes").List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			return fmt.Errorf("could not get pods: %s", err)
 		}
@@ -521,4 +502,82 @@ func k8sVersionToOpenShiftVersion(k8sMinorVersion int) (string, error) {
 	versionIncrements := k8sMinorVersion - baseKubernetesMinorVersion
 	openShiftMinorVersion := strconv.Itoa(versionIncrements + baseOpenShiftMinorVersion)
 	return openshiftMajorVersion + "." + openShiftMinorVersion, nil
+}
+
+// createSigner creates a signer using the private key from the privateKeyPath
+func (f *TestFramework) createSigner() error {
+	privateKeyBytes, err := ioutil.ReadFile(privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to find private key from path: %v, err: %v", privateKeyPath, err)
+	}
+
+	signer, err := ssh.ParsePrivateKey(privateKeyBytes)
+	if err != nil {
+		return fmt.Errorf("unable to parse private key: %v, err: %v", err, privateKeyPath)
+	}
+	f.Signer = signer
+	return nil
+}
+
+// createUserDataSecret creates a secret 'windows-user-data' in 'openshift-machine-api'
+// namespace. This secret will be used to inject cloud provider user data for creating
+// windows machines
+func (f *TestFramework) createUserDataSecret() error {
+	if f.Signer == nil {
+		return fmt.Errorf("failed to retrieve signer for private key: %v", privateKeyPath)
+	}
+
+	pubKeyBytes := ssh.MarshalAuthorizedKey(f.Signer.PublicKey())
+	if pubKeyBytes == nil {
+		return fmt.Errorf("failed to retrieve public key using signer for private key: %v", privateKeyPath)
+	}
+
+	// sshd service is started to create the default sshd_config file. This file is modified
+	// for enabling publicKey auth and the service is restarted for the changes to take effect.
+	userDataSecret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "windows-user-data",
+			Namespace: "openshift-machine-api",
+		},
+		Data: map[string][]byte{
+			"userData": []byte(`<powershell>
+			Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+			$firewallRuleName = "ContainerLogsPort"
+			$containerLogsPort = "10250"
+			New-NetFirewallRule -DisplayName $firewallRuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $containerLogsPort -EdgeTraversalPolicy Allow
+			Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+			Install-Module -Force OpenSSHUtils
+			Set-Service -Name ssh-agent -StartupType ‘Automatic’
+			Set-Service -Name sshd -StartupType ‘Automatic’
+			Start-Service ssh-agent
+			Start-Service sshd
+			$pubKeyConf = (Get-Content -path C:\ProgramData\ssh\sshd_config) -replace '#PubkeyAuthentication yes','PubkeyAuthentication yes'
+			$pubKeyConf | Set-Content -Path C:\ProgramData\ssh\sshd_config
+ 			$passwordConf = (Get-Content -path C:\ProgramData\ssh\sshd_config) -replace '#PasswordAuthentication yes','PasswordAuthentication yes'
+			$passwordConf | Set-Content -Path C:\ProgramData\ssh\sshd_config
+			$authFileConf = (Get-Content -path C:\ProgramData\ssh\sshd_config) -replace 'AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys','#AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys'
+			$authFileConf | Set-Content -Path C:\ProgramData\ssh\sshd_config
+			$pubKeyLocationConf = (Get-Content -path C:\ProgramData\ssh\sshd_config) -replace 'Match Group administrators','#Match Group administrators'
+			$pubKeyLocationConf | Set-Content -Path C:\ProgramData\ssh\sshd_config
+			Restart-Service sshd
+			New-item -Path $env:USERPROFILE -Name .ssh -ItemType Directory -force
+			echo "` + string(pubKeyBytes[:]) + `"| Out-File $env:USERPROFILE\.ssh\authorized_keys -Encoding ascii
+			</powershell>
+			<persist>true</persist>`),
+		},
+	}
+
+	// check if the userDataSecret already exists
+	err := f.client.Get(context.TODO(), kubeTypes.NamespacedName{Name: userDataSecret.Name, Namespace: userDataSecret.Namespace}, &v1.Secret{})
+	if err != nil {
+		if k8sapierrors.IsNotFound(err) {
+			log.Print("Creating a new Secret", "Secret.Namespace", userDataSecret.Namespace, "Secret.Name", userDataSecret.Name)
+			err = f.client.Create(context.TODO(), userDataSecret)
+			if err != nil {
+				return fmt.Errorf("error creating windows user data secre7t: %v", err)
+			}
+		}
+		return fmt.Errorf("error creating windows user data secret: %v", err)
+	}
+	return nil
 }
