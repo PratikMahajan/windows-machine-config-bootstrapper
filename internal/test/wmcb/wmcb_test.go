@@ -112,6 +112,7 @@ func (f *wmcbFramework) Setup(vmCount int, credentials *types.Credentials, skipV
 // TestWMCB runs the unit and e2e tests for WMCB on the remote VMs
 func TestWMCB(t *testing.T) {
 	for _, vm := range framework.WinVMs {
+		log.Printf("testing vm: %s", vm.GetCredentials().GetUserName())
 		wVM := &wmcbVM{vm}
 		files := strings.Split(*filesToBeTransferred, ",")
 		for _, file := range files {

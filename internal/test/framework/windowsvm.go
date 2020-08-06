@@ -15,8 +15,8 @@ import (
 	"time"
 
 	mapi "github.com/openshift/machine-api-operator/pkg/apis/machine/v1beta1"
+	"github.com/openshift/windows-machine-config-bootstrapper/internal/test/providers"
 	"github.com/openshift/windows-machine-config-bootstrapper/internal/test/types"
-	"github.com/openshift/windows-machine-config-operator/test/e2e/providers"
 	"github.com/pkg/sftp"
 )
 
@@ -89,7 +89,7 @@ func createMachineSet() error {
 }
 
 //
-func waitForMachines() ([]mapi.Machine, error) {
+func waitForMachines(vmCount int) ([]mapi.Machine, error) {
 	log.Print("Waiting for Machine Sets ")
 	cfg, err := config.GetConfig()
 	if err != nil {
@@ -100,11 +100,10 @@ func waitForMachines() ([]mapi.Machine, error) {
 	if err != nil {
 		return nil, err
 	}
-	windowsOSLabel := "node.openshift.io/os-id"
+	windowsOSLabel := "machine.openshift.io/os-id"
 	var provisionedMachines []mapi.Machine
-	timeOut := 2 * time.Minute
+	timeOut := 1 * time.Minute
 	startTime := time.Now()
-	requiredVMCount := 1
 	for i := 0; time.Since(startTime) <= timeOut; i++ {
 		allMachines := &mapi.MachineList{}
 
@@ -112,27 +111,26 @@ func waitForMachines() ([]mapi.Machine, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to list machines: %v", err)
 		}
-
 		provisionedMachines = []mapi.Machine{}
 
 		phaseProvisioned := "Provisioned"
 
-		for machine := range allMachines.Items {
-			instanceStatus := allMachines.Items[machine].Status
+		for _, machine := range allMachines.Items {
+			instanceStatus := machine.Status
 			if instanceStatus.Phase == nil {
 				continue
 			}
 			instancePhase := *instanceStatus.Phase
 			if instancePhase == phaseProvisioned {
-				provisionedMachines = append(provisionedMachines, allMachines.Items[machine])
+				provisionedMachines = append(provisionedMachines, machine)
 			}
 		}
 		time.Sleep(5 * time.Second)
 	}
-	if requiredVMCount == len(provisionedMachines) {
+	if vmCount == len(provisionedMachines) {
 		return provisionedMachines, nil
 	}
-	return nil, fmt.Errorf("expected event count %d but got %d", requiredVMCount, len(provisionedMachines))
+	return nil, fmt.Errorf("expected event count %d but got %d", vmCount, len(provisionedMachines))
 }
 
 // newWindowsVM creates and sets up a Windows VM in the cloud and returns the WindowsVM interface that can be used to
@@ -146,14 +144,15 @@ func newWindowsVM(vmCount int, credentials *types.Credentials, sshKey ssh.Signer
 		return nil, fmt.Errorf("unable to create Windows MachineSet: %v", err)
 	}
 
-	provisionedMachines, err := waitForMachines()
+	provisionedMachines, err := waitForMachines(vmCount)
 	if err != nil {
 		return nil, err
 	}
 
-	log.Print("%v", provisionedMachines)
 	for i, machine := range provisionedMachines {
-		winVM := &testWindowsVM{}
+		winVM := &testWindowsVM{
+			Windows: &types.Windows{},
+		}
 
 		ipAddress := ""
 		for _, address := range machine.Status.Addresses {
@@ -176,7 +175,9 @@ func newWindowsVM(vmCount int, credentials *types.Credentials, sshKey ssh.Signer
 		if len(instanceID) == 0 {
 			return nil, fmt.Errorf("empty instance id in provider id")
 		}
-		winVM.Credentials = types.NewCredentials(instanceID, ipAddress, types.Username)
+		creds := types.NewCredentials(instanceID, ipAddress, types.Username)
+		winVM.Credentials = creds
+		log.Print("setting up ssh and winrm")
 		winVM.Credentials.SetSSHKey(sshKey)
 		if err := winVM.GetSSHClient(); err != nil {
 			return nil, fmt.Errorf("unable to get ssh client for vm %s : %v", instanceID, err)

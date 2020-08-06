@@ -3,8 +3,10 @@ package framework
 import (
 	"context"
 	"fmt"
+	mapi "github.com/openshift/machine-api-operator/pkg/apis/machine/v1beta1"
 	"golang.org/x/crypto/ssh"
 	"io/ioutil"
+	"k8s.io/client-go/kubernetes/scheme"
 	"log"
 	"net/url"
 	"os"
@@ -114,7 +116,7 @@ func (f *TestFramework) Setup(vmCount int, credentials *types.Credentials, skipV
 	//	}
 	//	f.noTeardown = true
 	//}
-
+	mapi.AddToScheme(scheme.Scheme)
 	if err := initCIvars(); err != nil {
 		return fmt.Errorf("unable to initialize CI variables: %v", err)
 	}
@@ -156,7 +158,10 @@ func (f *TestFramework) Setup(vmCount int, credentials *types.Credentials, skipV
 	}
 
 	// TODO: make them run in parallel: https://issues.redhat.com/browse/WINC-178
-	f.WinVMs, _ = newWindowsVM(vmCount, credentials, f.Signer)
+	f.WinVMs, err = newWindowsVM(vmCount, credentials, f.Signer)
+	if err != nil {
+		return fmt.Errorf("unable to create windows vm %v", err)
+	}
 	return nil
 }
 

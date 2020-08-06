@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: windows-machine-config-bootstrapper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: windows-machine-config-bootstrapper
+  template:
+    metadata:
+      labels:
+        name: windows-machine-config-bootstrapper
+    spec:
+      hostNetwork: true
+      volumes:
+      - name: cloud-private-key
+        secret:
+          secretName: cloud-private-key
+      - name: kubeconfig
+        secret:
+          secretName: kubeconfig
+      containers:
+        - name: windows-machine-config-bootstrapper
+          # Replace this with the built image name
+          image: quay.io/pratikmahajan/wmcb:0.1
+          imagePullPolicy: Always
+          volumeMounts:
+          - name: cloud-private-key
+            mountPath: "/etc/private-key/"
+            readOnly: true
+          - name: kubeconfig
+            mountPath: "/etc/kubeconfig/"
+            readOnly: true
+          env:
+            - name: KUBECONFIG
+              valueFrom:
+                secretKeyRef:
+                  name: tmp
+                  key: KUBECONFIG
+            - name: ARTIFACT_DIR
+              valueFrom:
+                secretKeyRef:
+                  name: tmp
+                  key: ARTIFACT_DIR
+            - name: AWS_SHARED_CREDENTIALS_FILE
+              valueFrom:
+                secretKeyRef:
+                  name: tmp
+                  key: AWS_SHARED_CREDENTIALS_FILE
+            - name: KUBE_SSH_KEY_PATH
+              valueFrom:
+                secretKeyRef:
+                  name: tmp
+                  key: KUBE_SSH_KEY_PATH
