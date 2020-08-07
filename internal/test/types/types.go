@@ -107,6 +107,7 @@ func (w *Windows) CopyFile(filePath, remoteDir string) error {
 }
 
 func (w *Windows) Run(cmd string, psCmd bool) (string, string, error) {
+	time.Sleep(1 * time.Second)
 	if w.WinrmClient == nil {
 		return "", "", fmt.Errorf("Run cannot be called without a WinRM client")
 	}

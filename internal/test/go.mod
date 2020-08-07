@@ -13,15 +13,18 @@ replace (
 )
 
 require (
+	github.com/aws/aws-sdk-go v1.25.48
 	github.com/golang/protobuf v1.3.3 // indirect
 	github.com/google/go-github/v29 v29.0.2
 	github.com/googleapis/gnostic v0.4.0 // indirect
 	github.com/masterzen/winrm v0.0.0-20200615185753-c42b5136ff88
+	github.com/openshift/api v0.0.0-20200424083944-0422dc17083e
 	github.com/openshift/client-go v0.0.0-20200422192633-6f6c07fc2a70
 	github.com/openshift/machine-api-operator v0.2.1-0.20200520080344-fe76daf636f4
 	github.com/openshift/windows-machine-config-bootstrapper/tools/windows-node-installer v0.0.0-20200724145615-dcb438a79a68
 	github.com/openshift/windows-machine-config-operator v0.0.0-20200723182539-9de618aa7d27
 	github.com/operator-framework/operator-sdk v0.18.1
+	github.com/pkg/errors v0.9.1
 	github.com/pkg/sftp v1.11.0
 	github.com/stretchr/testify v1.5.1
 	golang.org/x/crypto v0.0.0-20200414173820-0848c9571904
@@ -29,5 +32,6 @@ require (
 	k8s.io/api v0.18.3
 	k8s.io/apimachinery v0.18.3
 	k8s.io/client-go v12.0.0+incompatible
+	sigs.k8s.io/cluster-api-provider-aws v0.0.0-00010101000000-000000000000
 	sigs.k8s.io/controller-runtime v0.6.0
 )

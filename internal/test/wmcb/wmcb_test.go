@@ -112,13 +112,16 @@ func (f *wmcbFramework) Setup(vmCount int, credentials *types.Credentials, skipV
 // TestWMCB runs the unit and e2e tests for WMCB on the remote VMs
 func TestWMCB(t *testing.T) {
 	for _, vm := range framework.WinVMs {
-		log.Printf("testing vm: %s", vm.GetCredentials().GetUserName())
+		log.Printf("testing vm: %s", vm.GetCredentials().GetInstanceId())
 		wVM := &wmcbVM{vm}
 		files := strings.Split(*filesToBeTransferred, ",")
 		for _, file := range files {
 			err := wVM.CopyFile(file, remoteDir)
 			require.NoError(t, err, "error copying %s to the Windows VM", file)
 		}
+		t.Run("Test VM Connection", func(t *testing.T) {
+			assert.NoError(t, wVM.runTest("dir"), "VM connection failure")
+		})
 		t.Run("Unit", func(t *testing.T) {
 			assert.NoError(t, wVM.runTest(unitExecutable+" --test.v"), "WMCB unit test failed")
 		})
@@ -142,22 +145,18 @@ func (vm *wmcbVM) runE2ETestSuite(t *testing.T) {
 
 // runTest runs the testCmd in the given VM
 func (vm *wmcbVM) runTest(testCmd string) error {
-	stdout, stderr, err := vm.Run(testCmd, true)
+	output, err := vm.RunOverSSH(testCmd, true)
 
 	// Logging the output so that it is visible on the CI page
-	log.Printf("\n%s\n", stdout)
-	log.Printf("\n%s\n", stderr)
+	log.Printf("\n%s\n", output)
 
 	if err != nil {
 		return fmt.Errorf("error running test: %v", err)
 	}
-	if stderr != "" {
-		return fmt.Errorf("test returned stderr output")
-	}
-	if strings.Contains(stdout, "FAIL") {
+	if strings.Contains(output, "FAIL") {
 		return fmt.Errorf("test output showed a failure")
 	}
-	if strings.Contains(stdout, "panic") {
+	if strings.Contains(output, "panic") {
 		return fmt.Errorf("test output showed panic")
 	}
 	return nil
@@ -192,13 +191,13 @@ func (vm *wmcbVM) runTestConfigureCNI(t *testing.T) {
 // initializeTestBootstrapperFiles initializes the files required for initialize-kubelet
 func (vm *wmcbVM) initializeTestBootstrapperFiles() error {
 	// Create the temp directory
-	_, _, err := vm.Run(mkdirCmd(remoteDir), false)
+	_, err := vm.RunOverSSH(mkdirCmd(remoteDir), false)
 	if err != nil {
 		return fmt.Errorf("unable to create remote directory %s: %v", remoteDir, err)
 	}
 
 	// Copy kubelet.exe to C:\Windows\Temp\
-	_, _, err = vm.Run("cp "+remoteDir+"\\kubelet.exe "+winTemp, true)
+	_, err = vm.RunOverSSH("cp "+remoteDir+"kubernetes\\node\\bin\\kubelet.exe "+winTemp, true)
 	if err != nil {
 		return fmt.Errorf("unable to copy kubelet.exe to %s", winTemp)
 	}
@@ -206,7 +205,7 @@ func (vm *wmcbVM) initializeTestBootstrapperFiles() error {
 	// The 0.35.0 maps to ignition spec v2. This should be modified when we switch to v3
 	ignitionUserAgentSpec := "Ignition/0.35.0"
 	// Download the worker ignition to C:\Windows\Tenp\ using the script that ignores the server cert
-	_, _, err = vm.Run(wgetIgnoreCertCmd+" -server https://api-int."+framework.ClusterAddress+":22623/config/worker"+
+	_, err = vm.RunOverSSH(wgetIgnoreCertCmd+" -server https://api-int."+framework.ClusterAddress+":22623/config/worker"+
 		" -output "+winTemp+"worker.ign"+" -useragent "+ignitionUserAgentSpec, true)
 	if err != nil {
 		return fmt.Errorf("unable to download worker.ign: %v", err)

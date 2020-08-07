@@ -205,7 +205,7 @@ func (a *awsProvider) getSubnet(infraID string) (*ec2.Subnet, error) {
 
 	// Finding required subnet within the vpc.
 	foundSubnet := false
-	requiredSubnet := "-private-"
+	requiredSubnet := "-public-"
 
 	for _, subnet := range subnets.Subnets {
 		for _, tag := range subnet.Tags {
@@ -321,6 +321,7 @@ func (a *awsProvider) GenerateMachineSet(withWindowsLabel bool, replicas int32) 
 		return nil, fmt.Errorf("unable to get subnet: %v", err)
 	}
 	machineSetName := "e2e-windows-machineset-"
+	publicIP := true
 	matchLabels := map[string]string{
 		"machine.openshift.io/cluster-api-cluster": clusterName,
 	}
@@ -366,6 +367,7 @@ func (a *awsProvider) GenerateMachineSet(withWindowsLabel bool, replicas int32) 
 		},
 		UserDataSecret: &v1.LocalObjectReference{Name: "windows-user-data"},
 		KeyName:        &a.sshKeyPair,
+		PublicIP:       &publicIP,
 	}
 
 	rawBytes, err := json.Marshal(providerSpec)

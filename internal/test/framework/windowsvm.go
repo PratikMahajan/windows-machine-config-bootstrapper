@@ -102,7 +102,7 @@ func waitForMachines(vmCount int) ([]mapi.Machine, error) {
 	}
 	windowsOSLabel := "machine.openshift.io/os-id"
 	var provisionedMachines []mapi.Machine
-	timeOut := 1 * time.Minute
+	timeOut := 6 * time.Minute
 	startTime := time.Now()
 	for i := 0; time.Since(startTime) <= timeOut; i++ {
 		allMachines := &mapi.MachineList{}
@@ -156,7 +156,7 @@ func newWindowsVM(vmCount int, credentials *types.Credentials, sshKey ssh.Signer
 
 		ipAddress := ""
 		for _, address := range machine.Status.Addresses {
-			if address.Type == core.NodeInternalIP {
+			if address.Type == core.NodeExternalIP {
 				ipAddress = address.Address
 			}
 		}
