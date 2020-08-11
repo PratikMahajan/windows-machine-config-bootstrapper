@@ -27,24 +27,24 @@ done
 WMCO_ROOT=$(dirname "${BASH_SOURCE}")/..
 WMCB_TEST_DIR=$WMCO_ROOT/internal/test/wmcb
 
-# Create a temporary directory for the repos
-TMP_DIR=$(mktemp -d)
-trap "rm -rf $TMP_DIR" EXIT
-
-pushd "$TMP_DIR"
-# Build hybrid-overlay-node.exe
-$GIT_CLONE https://github.com/openshift/ovn-kubernetes.git
-cd ovn-kubernetes/go-controller/
-make windows
+## Create a temporary directory for the repos
+TMP_DIR=/tmp/pm
+#trap "rm -rf $TMP_DIR" EXIT
+#
+#pushd "$TMP_DIR"
+## Build hybrid-overlay-node.exe
+#$GIT_CLONE https://github.com/openshift/ovn-kubernetes.git
+#cd ovn-kubernetes/go-controller/
+#make windows
 HYBRID_OVERLAY_BIN=$TMP_DIR"/ovn-kubernetes/go-controller/_output/go/bin/windows/hybrid-overlay-node.exe"
 
-# Build kubelet.exe
-cd "$TMP_DIR"
-$GIT_CLONE https://github.com/openshift/kubernetes.git
-cd kubernetes
-KUBE_BUILD_PLATFORMS=windows/amd64 make WHAT=cmd/kubelet
+## Build kubelet.exe
+#cd "$TMP_DIR"
+#$GIT_CLONE https://github.com/openshift/kubernetes.git
+#cd kubernetes
+#KUBE_BUILD_PLATFORMS=windows/amd64 make WHAT=cmd/kubelet
 KUBELET_BIN=$TMP_DIR"/kubernetes/_output/local/bin/windows/amd64/kubelet.exe"
-popd
+#popd
 
 # Build the unit test binary
 cd "${WMCO_ROOT}"

@@ -27,7 +27,7 @@ var defaultIgnitionFileContents = `{"ignition":{"config":{},"security":{"tls":{}
 
 func init() {
 	pflag.StringVar(&ignitionFilePath, "ignition-file", "C:\\Windows\\Temp\\worker.ign", "ign file location")
-	pflag.StringVar(&kubeletPath, "kubelet-path", "C:\\Windows\\Temp\\kubelet.exe", "kubelet location")
+	pflag.StringVar(&kubeletPath, "kubelet-path", "C:\\Temp\\kubelet.exe", "kubelet location")
 	pflag.StringVar(&installDir, "install-dir", "C:\\k", "Installation directory")
 }
 
