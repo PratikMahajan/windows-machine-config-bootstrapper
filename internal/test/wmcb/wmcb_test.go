@@ -17,13 +17,11 @@ import (
 
 	"github.com/openshift/windows-machine-config-bootstrapper/internal/test"
 	e2ef "github.com/openshift/windows-machine-config-bootstrapper/internal/test/framework"
-	"github.com/openshift/windows-machine-config-bootstrapper/tools/windows-node-installer/pkg/types"
+	"github.com/openshift/windows-machine-config-bootstrapper/internal/test/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	certificates "k8s.io/api/certificates/v1beta1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/util/retry"
 )
 
 const (
@@ -96,10 +94,10 @@ func (f *wmcbFramework) initializePackages() error {
 }
 
 // Setup initializes the wsuFramework.
-func (f *wmcbFramework) Setup(vmCount int, credentials []*types.Credentials, skipVMsetup bool) error {
+func (f *wmcbFramework) Setup(vmCount int, credentials *types.Credentials) error {
 	f.TestFramework = &e2ef.TestFramework{}
 	// Set up the framework
-	err := f.TestFramework.Setup(vmCount, credentials, skipVMsetup)
+	err := f.TestFramework.Setup(vmCount, credentials)
 	if err != nil {
 		return fmt.Errorf("framework setup failed: %v", err)
 	}
@@ -112,6 +110,7 @@ func (f *wmcbFramework) Setup(vmCount int, credentials []*types.Credentials, ski
 // TestWMCB runs the unit and e2e tests for WMCB on the remote VMs
 func TestWMCB(t *testing.T) {
 	for _, vm := range framework.WinVMs {
+		log.Printf("Testing VM: %s", vm.GetCredentials().GetInstanceId())
 		wVM := &wmcbVM{vm}
 		files := strings.Split(*filesToBeTransferred, ",")
 		for _, file := range files {
@@ -132,10 +131,6 @@ func TestWMCB(t *testing.T) {
 func (vm *wmcbVM) runE2ETestSuite(t *testing.T) {
 	vm.runTestBootstrapper(t)
 
-	// Handle the bootstrap and node CSRs
-	err := handleCSRs()
-	require.NoError(t, err, "error handling CSRs")
-
 	vm.runTestConfigureCNI(t)
 }
 
@@ -148,7 +143,7 @@ func (vm *wmcbVM) runTest(testCmd string) error {
 	log.Printf("\n%s\n", stderr)
 
 	if err != nil {
-		return fmt.Errorf("error running test: %v", err)
+		return fmt.Errorf("error running test: %v: %s", err, output)
 	}
 	if stderr != "" {
 		return fmt.Errorf("test returned stderr output")
@@ -372,116 +367,6 @@ func (vm *wmcbVM) waitForHybridOverlayToRun() error {
 
 	// hybrid-overlay-node never started running
 	return fmt.Errorf("timeout waiting for hybrid-overlay-node: %v", err)
-}
-
-// approve approves the given CSR if it has not already been approved
-// Based on https://github.com/kubernetes/kubectl/blob/master/pkg/cmd/certificates/certificates.go#L237
-func approve(csr *certificates.CertificateSigningRequest) error {
-	// Check if the certificate has already been approved
-	for _, c := range csr.Status.Conditions {
-		if c.Type == certificates.CertificateApproved {
-			return nil
-		}
-	}
-
-	// Approve the CSR
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Ensure we get the current version
-		csr, err := framework.K8sclientset.CertificatesV1beta1().CertificateSigningRequests().Get(context.TODO(),
-			csr.GetName(), metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-
-		// Add the approval status condition
-		csr.Status.Conditions = append(csr.Status.Conditions, certificates.CertificateSigningRequestCondition{
-			Type:           certificates.CertificateApproved,
-			Reason:         "WMCBe2eTestRunnerApprove",
-			Message:        "This CSR was approved by WMCB e2e test runner",
-			LastUpdateTime: metav1.Now(),
-		})
-
-		_, err = framework.K8sclientset.CertificatesV1beta1().CertificateSigningRequests().UpdateApproval(context.TODO(),
-			csr, metav1.UpdateOptions{})
-		return err
-	})
-}
-
-//findCSR finds the CSR that matches the requestor filter
-func findCSR(requestor string) (*certificates.CertificateSigningRequest, error) {
-	var foundCSR *certificates.CertificateSigningRequest
-	// Find the CSR
-	for retries := 0; retries < e2ef.RetryCount; retries++ {
-		csrs, err := framework.K8sclientset.CertificatesV1beta1().CertificateSigningRequests().List(context.TODO(),
-			metav1.ListOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("unable to get CSR list: %v", err)
-		}
-		if csrs == nil {
-			time.Sleep(e2ef.RetryInterval)
-			continue
-		}
-
-		for _, csr := range csrs.Items {
-			if !strings.Contains(csr.Spec.Username, requestor) {
-				continue
-			}
-			var handledCSR bool
-			for _, c := range csr.Status.Conditions {
-				if c.Type == certificates.CertificateApproved || c.Type == certificates.CertificateDenied {
-					handledCSR = true
-					break
-				}
-			}
-			if handledCSR {
-				continue
-			}
-			foundCSR = &csr
-			break
-		}
-
-		if foundCSR != nil {
-			break
-		}
-		time.Sleep(e2ef.RetryInterval)
-	}
-
-	if foundCSR == nil {
-		return nil, fmt.Errorf("unable to find CSR with requestor %s", requestor)
-	}
-	return foundCSR, nil
-}
-
-// handleCSR finds the CSR based on the requestor filter and approves it
-func handleCSR(requestorFilter string) error {
-	csr, err := findCSR(requestorFilter)
-	if err != nil {
-		return fmt.Errorf("error finding CSR for %s: %v", requestorFilter, err)
-	}
-
-	if err = approve(csr); err != nil {
-		return fmt.Errorf("error approving CSR for %s: %v", requestorFilter, err)
-	}
-
-	return nil
-}
-
-// handleCSRs handles the approval of bootstrap and node CSRs
-func handleCSRs() error {
-	// Handle the bootstrap CSR
-	err := handleCSR("system:serviceaccount:openshift-machine-config-operator:node-bootstrapper")
-	if err != nil {
-		return fmt.Errorf("unable to handle bootstrap CSR: %v", err)
-	}
-
-	// Handle the node CSR
-	// Note: for the product we want to get the node name from the instance information
-	err = handleCSR("system:node:")
-	if err != nil {
-		return fmt.Errorf("unable to handle node CSR: %v", err)
-	}
-
-	return nil
 }
 
 // mkdirCmd returns the Windows command to create a directory if it does not exists
