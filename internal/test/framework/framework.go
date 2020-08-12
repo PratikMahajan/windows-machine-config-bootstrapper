@@ -115,7 +115,7 @@ func initCIvars() error {
 		return fmt.Errorf("AWS_SHARED_CREDENTIALS_FILE environment variable not set")
 	}
 	artifactDir = os.Getenv("ARTIFACT_DIR")
-	if awsCredentials == "" {
+	if artifactDir == "" {
 		return fmt.Errorf("ARTIFACT_DIR environment variable not set")
 	}
 	privateKeyPath = os.Getenv("KUBE_SSH_KEY_PATH")
