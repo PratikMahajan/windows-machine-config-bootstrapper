@@ -153,13 +153,10 @@ func (f *TestFramework) newWindowsVM(vmCount int) ([]TestWindowsVM, error) {
 		}
 		creds := types.NewCredentials(instanceID, ipAddress, types.Username)
 		winVM.Credentials = creds
-		log.Print("setting up ssh and winrm")
+		log.Print("setting up ssh")
 		winVM.Credentials.SetSSHKey(f.Signer)
 		if err := winVM.GetSSHClient(); err != nil {
 			return nil, fmt.Errorf("unable to get ssh client for vm %s : %v", instanceID, err)
-		}
-		if err := winVM.SetupWinRMClient(); err != nil {
-			return nil, fmt.Errorf("unable to setup winRM client for vm %s : %v", instanceID, err)
 		}
 		w[i] = winVM
 	}

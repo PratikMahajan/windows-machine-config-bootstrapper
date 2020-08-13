@@ -136,22 +136,18 @@ func (vm *wmcbVM) runE2ETestSuite(t *testing.T) {
 
 // runTest runs the testCmd in the given VM
 func (vm *wmcbVM) runTest(testCmd string) error {
-	stdout, stderr, err := vm.Run(testCmd, true)
+	output, err := vm.Run(testCmd, true)
 
 	// Logging the output so that it is visible on the CI page
-	log.Printf("\n%s\n", stdout)
-	log.Printf("\n%s\n", stderr)
+	log.Printf("\n%s\n", output)
 
 	if err != nil {
 		return fmt.Errorf("error running test: %v: %s", err, output)
 	}
-	if stderr != "" {
-		return fmt.Errorf("test returned stderr output")
-	}
-	if strings.Contains(stdout, "FAIL") {
+	if strings.Contains(output, "FAIL") {
 		return fmt.Errorf("test output showed a failure")
 	}
-	if strings.Contains(stdout, "panic") {
+	if strings.Contains(output, "panic") {
 		return fmt.Errorf("test output showed panic")
 	}
 	return nil
@@ -186,24 +182,24 @@ func (vm *wmcbVM) runTestConfigureCNI(t *testing.T) {
 // initializeTestBootstrapperFiles initializes the files required for initialize-kubelet
 func (vm *wmcbVM) initializeTestBootstrapperFiles() error {
 	// Create the temp directory
-	_, _, err := vm.Run(mkdirCmd(remoteDir), false)
+	_, err := vm.Run(mkdirCmd(remoteDir), false)
 	if err != nil {
 		return fmt.Errorf("unable to create remote directory %s: %v", remoteDir, err)
 	}
 
 	// Copy kubelet.exe to C:\Windows\Temp\
-	_, _, err = vm.Run("cp "+remoteDir+"\\kubelet.exe "+winTemp, true)
+	_, err = vm.Run("cp "+remoteDir+"kubelet.exe "+winTemp, true)
 	if err != nil {
-		return fmt.Errorf("unable to copy kubelet.exe to %s", winTemp)
+		return fmt.Errorf("unable to copy kubelet.exe to %s: %v", winTemp, err)
 	}
 
 	// Ignition v2.3.0 maps to Ignition config spec v3.1.0.
 	ignitionAcceptHeaderSpec := "application/vnd.coreos.ignition+json`;version=3.1.0"
 	// Download the worker ignition to C:\Windows\Tenp\ using the script that ignores the server cert
-	_, _, err = vm.Run(wgetIgnoreCertCmd+" -server https://api-int."+framework.ClusterAddress+":22623/config/worker"+
+	output, err := vm.Run(wgetIgnoreCertCmd+" -server https://api-int."+framework.ClusterAddress+":22623/config/worker"+
 		" -output "+winTemp+"worker.ign"+" -acceptHeader "+ignitionAcceptHeaderSpec, true)
 	if err != nil {
-		return fmt.Errorf("unable to download worker.ign: %v", err)
+		return fmt.Errorf("unable to download worker.ign: %v : %s", err, output)
 	}
 
 	return nil
@@ -211,10 +207,11 @@ func (vm *wmcbVM) initializeTestBootstrapperFiles() error {
 
 // remoteDownload downloads the tar file in url to the remoteDownloadFile location and checks if the SHA matches
 func (vm *wmcbVM) remoteDownload(pkg PkgInfo, remoteDownloadFile string) error {
-	_, stderr, err := vm.Run("if (!(Test-Path "+remoteDownloadFile+")) { wget "+pkg.getUrl()+" -o "+remoteDownloadFile+" }",
-		true)
+	useragent := "*/*"
+	cmd := wgetIgnoreCertCmd + " -server \"" + pkg.getUrl() + "\" -output \"" + remoteDownloadFile + "\" -acceptHeader \"" + useragent + "\""
+	output, err := vm.Run(cmd, true)
 	if err != nil {
-		return fmt.Errorf("unable to download %s: %v\n%s", pkg.getUrl(), err, stderr)
+		return fmt.Errorf("unable to download %s: %v : Output: %s", pkg.getUrl(), err, output)
 	}
 
 	shaValue, err := pkg.getShaValue()
@@ -223,12 +220,12 @@ func (vm *wmcbVM) remoteDownload(pkg PkgInfo, remoteDownloadFile string) error {
 	}
 
 	// Perform a checksum check
-	stdout, _, err := vm.Run("certutil -hashfile "+remoteDownloadFile+" "+pkg.getShaType(), true)
+	output, err = vm.Run("certutil -hashfile "+remoteDownloadFile+" "+pkg.getShaType(), true)
 	if err != nil {
 		return fmt.Errorf("unable to check SHA of %s: %v", remoteDownloadFile, err)
 	}
-	if !strings.Contains(stdout, shaValue) {
-		return fmt.Errorf("package %s SHA does not match: %v\n%s", remoteDownloadFile, err, stdout)
+	if !strings.Contains(output, shaValue) {
+		return fmt.Errorf("package %s SHA does not match: %v\n%s", remoteDownloadFile, err, output)
 	}
 
 	return nil
@@ -244,9 +241,9 @@ func (vm *wmcbVM) remoteDownloadExtract(pkg PkgInfo, remoteDownloadFile, remoteE
 	}
 
 	// Extract files from the archive
-	_, stderr, err := vm.Run("tar -xf "+remoteDownloadFile+" -C "+remoteExtractDir, true)
+	output, err := vm.Run("tar -xf "+remoteDownloadFile+" -C "+remoteExtractDir, true)
 	if err != nil {
-		return fmt.Errorf("unable to extract %s: %v\n%s", remoteDownloadFile, err, stderr)
+		return fmt.Errorf("unable to extract %s: %v\n%s", remoteDownloadFile, err, output)
 	}
 	return nil
 }
@@ -254,9 +251,9 @@ func (vm *wmcbVM) remoteDownloadExtract(pkg PkgInfo, remoteDownloadFile, remoteE
 // initializeTestConfigureCNIFiles initializes the files required for configure-cni
 func (vm *wmcbVM) initializeTestConfigureCNIFiles(ovnHostSubnet string) error {
 	// Create the CNI directory C:\Windows\Temp\cni on the Windows VM
-	_, stderr, err := vm.Run(mkdirCmd(winCNIDir), false)
+	output, err := vm.Run(mkdirCmd(winCNIDir), false)
 	if err != nil {
-		return fmt.Errorf("unable to create remote directory %s: %v\n%s", remoteDir, err, stderr)
+		return fmt.Errorf("unable to create remote directory %s: %v\n%s", remoteDir, err, output)
 	}
 
 	cniPkgUrl := framework.pkgs[cniPluginPkgName].getUrl()
@@ -289,10 +286,10 @@ func (vm *wmcbVM) initializeTestConfigureCNIFiles(ovnHostSubnet string) error {
 // handleHybridOverlay ensures that the hybrid overlay is running on the node
 func (vm *wmcbVM) handleHybridOverlay(nodeName string) error {
 	// Check if the hybrid-overlay-node is running
-	_, stderr, err := vm.Run("Get-Process -Name \"hybrid-overlay-node\"", true)
+	output, err := vm.Run("Get-Process -Name \"hybrid-overlay-node\"", true)
 
 	// stderr being empty implies that an hybrid-overlay-node was running. This is to help with local development.
-	if err == nil || stderr == "" {
+	if err == nil || output == "" {
 		return nil
 	}
 
@@ -302,15 +299,15 @@ func (vm *wmcbVM) handleHybridOverlay(nodeName string) error {
 		return fmt.Errorf("error waiting for hybrid overlay node annotation: %v", err)
 	}
 
-	_, stderr, err = vm.Run(mkdirCmd(kLog), false)
+	output, err = vm.Run(mkdirCmd(kLog), false)
 	if err != nil {
-		return fmt.Errorf("unable to create remote directory %s: %v\n%s", kLog, err, stderr)
+		return fmt.Errorf("unable to create remote directory %s: %v\n%s", kLog, err, output)
 	}
 
 	// Start the hybrid-overlay-node in the background over ssh. We cannot use vm.Run() and by extension WinRM.Run() here as
 	// we observed WinRM.Run() returning before the commands completes execution. The reason for that is unclear and
 	// requires further investigation.
-	go vm.RunOverSSH(hybridOverlayExecutable+" --node "+nodeName+
+	go vm.Run(hybridOverlayExecutable+" --node "+nodeName+
 		" --k8s-kubeconfig c:\\k\\kubeconfig > "+kLog+"hybrid-overlay.log 2>&1", false)
 
 	err = vm.waitForHybridOverlayToRun()
@@ -333,24 +330,24 @@ func (vm *wmcbVM) handleHybridOverlay(nodeName string) error {
 
 // waitForOpenShiftHSNNetworks waits for the OpenShift HNS networks to be created until the timeout is reached
 func (vm *wmcbVM) waitForOpenShiftHNSNetworks() error {
-	var stdout string
+	var output string
 	var err error
 	for retries := 0; retries < e2ef.RetryCount; retries++ {
-		stdout, _, err = vm.Run("Get-HnsNetwork", true)
+		output, err = vm.Run("Get-HnsNetwork", true)
 		if err != nil {
 			// retry
 			continue
 		}
 
-		if strings.Contains(stdout, "BaseOVNKubernetesHybridOverlayNetwork") &&
-			strings.Contains(stdout, "OVNKubernetesHybridOverlayNetwork") {
+		if strings.Contains(output, "BaseOVNKubernetesHybridOverlayNetwork") &&
+			strings.Contains(output, "OVNKubernetesHybridOverlayNetwork") {
 			return nil
 		}
 		time.Sleep(e2ef.RetryInterval)
 	}
 
 	// OpenShift HNS networks were not found
-	log.Printf("Get-HnsNetwork:\n%s", stdout)
+	log.Printf("Get-HnsNetwork:\n%s", output)
 	return fmt.Errorf("timeout waiting for OpenShift HNS networks: %v", err)
 }
 
@@ -358,7 +355,7 @@ func (vm *wmcbVM) waitForOpenShiftHNSNetworks() error {
 func (vm *wmcbVM) waitForHybridOverlayToRun() error {
 	var err error
 	for retries := 0; retries < e2ef.RetryCount; retries++ {
-		_, _, err = vm.Run("Get-Process -Name \"hybrid-overlay-node\"", true)
+		_, err = vm.Run("Get-Process -Name \"hybrid-overlay-node\"", true)
 		if err == nil {
 			return nil
 		}
