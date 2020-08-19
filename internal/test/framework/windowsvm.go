@@ -132,7 +132,7 @@ func (f *TestFramework) newWindowsVM(vmCount int) ([]TestWindowsVM, error) {
 
 		ipAddress := ""
 		for _, address := range machine.Status.Addresses {
-			if address.Type == core.NodeExternalIP {
+			if address.Type == core.NodeInternalIP {
 				ipAddress = address.Address
 			}
 		}

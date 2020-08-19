@@ -202,18 +202,26 @@ func (f *TestFramework) getOpenShiftOperatorClient(config *restclient.Config) er
 // are running against. For example: the kubernetes API server endpoint https://api.abc.devcluster.openshift.com:6443
 // gets converted to abc.devcluster.openshift.com
 func (f *TestFramework) getClusterAddress(config *restclient.Config) error {
-	if config.Host == "" {
-		return fmt.Errorf("API server has empty host name")
+	host, err := f.OSConfigClient.ConfigV1().Infrastructures().Get(context.TODO(), "cluster", metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("unable to get cluster infrastructure resource: %v", err)
+	}
+	// get API server internal url of format https://api-int.abc.devcluster.openshift.com:6443
+	if host.Status.APIServerInternalURL == "" {
+		return fmt.Errorf("could not get host name for the kubernetes api server")
 	}
 
-	clusterEndPoint, err := url.Parse(config.Host)
+	kubeAPIServerEndpoint := host.Status.APIServerInternalURL
+
+	clusterEndPoint, err := url.Parse(kubeAPIServerEndpoint)
 	if err != nil {
 		return fmt.Errorf("unable to parse the API server endpoint: %v", err)
 	}
 
 	hostName := clusterEndPoint.Hostname()
-	if !strings.HasPrefix(hostName, "api.") {
-		return fmt.Errorf("API server has invalid format: expected hostname to start with `api.`")
+	log.Print(hostName)
+	if !strings.HasPrefix(hostName, "api-int.") {
+		return fmt.Errorf("API server has invalid format: expected hostname to start with `api-int.`")
 	}
 
 	f.ClusterAddress = hostName
@@ -328,8 +336,8 @@ func (f *TestFramework) GetReleaseArtifactSHA(artifactName string) (string, erro
 	return "", fmt.Errorf("no artifact with name %s", artifactName)
 }
 
-// GetNode returns a pointer to the node object associated with the external IP provided
-func (f *TestFramework) GetNode(externalIP string) (*v1.Node, error) {
+// GetNode returns a pointer to the node object associated with the internal IP provided
+func (f *TestFramework) GetNode(internalIP string) (*v1.Node, error) {
 	var matchedNode *v1.Node
 
 	nodes, err := f.K8sclientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
@@ -343,7 +351,7 @@ func (f *TestFramework) GetNode(externalIP string) (*v1.Node, error) {
 	// Find the node that has the given IP
 	for _, node := range nodes.Items {
 		for _, address := range node.Status.Addresses {
-			if address.Type == "ExternalIP" && address.Address == externalIP {
+			if address.Type == "InternalIP" && address.Address == internalIP {
 				matchedNode = &node
 				break
 			}
@@ -353,7 +361,7 @@ func (f *TestFramework) GetNode(externalIP string) (*v1.Node, error) {
 		}
 	}
 	if matchedNode == nil {
-		return nil, fmt.Errorf("could not find node with IP: %s", externalIP)
+		return nil, fmt.Errorf("could not find node with IP: %s", internalIP)
 	}
 	return matchedNode, nil
 }
@@ -370,9 +378,9 @@ func (f *TestFramework) WriteToArtifactDir(contents []byte, subDirName, filename
 	return ioutil.WriteFile(path, contents, os.ModePerm)
 }
 
-// GetNode uses external IP and finds out the name associated with the node
-func (f *TestFramework) GetNodeName(externalIP string) (string, error) {
-	node, err := f.GetNode(externalIP)
+// GetNode uses internal IP and finds out the name associated with the node
+func (f *TestFramework) GetNodeName(internalIP string) (string, error) {
+	node, err := f.GetNode(internalIP)
 	if err != nil {
 		return "", fmt.Errorf("error while getting required kubernetes node object: %v", err)
 	}
@@ -399,13 +407,13 @@ func (f *TestFramework) RetrieveArtifacts() {
 			continue
 		}
 
-		externalIP := vm.GetCredentials().GetIPAddress()
-		if len(externalIP) == 0 {
+		internalIP := vm.GetCredentials().GetIPAddress()
+		if len(internalIP) == 0 {
 			log.Printf("no external ip address found for the vm with instance ID %s", instanceID)
 			continue
 		}
 
-		nodeName, err := f.GetNodeName(externalIP)
+		nodeName, err := f.GetNodeName(internalIP)
 		if err != nil {
 			log.Printf("error while getting node name associated with the vm %s: %v", instanceID, err)
 		}
