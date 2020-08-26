@@ -1,47 +1,63 @@
-# This image will be used in OpenShift CI so that we can run tests which require more utilities
-# than the default golang image has to offer
+FROM registry.access.redhat.com/ubi8/ubi-minimal as build
+LABEL stage=build
 
-FROM centos:centos8
+RUN microdnf -y install rsync make git tar findutils diffutils
 
-WORKDIR /go/src/github.com/openshift/windows-machine-config-bootstrapper/
-
-COPY . .
-
-RUN yum -y update && yum -y install git make python2 python2-pip gcc jq
-
+# We are explictly downloading Go instead of using `microdnf install`, as microdnf currently installs Go v1.13.x,
+# we need minimim Go v1.14.4 for building the kubelet.
 # Download and install Go
-RUN curl -L -s https://dl.google.com/go/go1.13.8.linux-amd64.tar.gz > go1.13.8.linux-amd64.tar.gz \
-    && sha256sum go1.13.8.linux-amd64.tar.gz \
-    && echo "0567734d558aef19112f2b2873caa0c600f1b4a5827930eb5a7f35235219e9d8 go1.13.8.linux-amd64.tar.gz" | sha256sum -c \
-    && tar -xzf go1.13.8.linux-amd64.tar.gz \
+RUN curl -L -s https://dl.google.com/go/go1.14.7.linux-amd64.tar.gz > go1.14.7.linux-amd64.tar.gz \
+    && sha256sum go1.14.7.linux-amd64.tar.gz \
+    && echo "4a7fa60f323ee1416a4b1425aefc37ea359e9d64df19c326a58953a97ad41ea5  go1.14.7.linux-amd64.tar.gz" | sha256sum -c \
+    && tar -xzf go1.14.7.linux-amd64.tar.gz \
     && mv go /usr/local \
     && rm -rf ./go*
 
-# Download and install oc
-RUN curl -L -s https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.2.2/openshift-client-linux-4.2.2.tar.gz -o openshift-origin-client-tools.tar.gz \
-    && echo "8f853477fa99cfc4087ad2ddf9b13b9d22e5fc4d5dc24c63ec5b0a91bb337fc9 openshift-origin-client-tools.tar.gz" | sha256sum -c \
-    && tar -xzf openshift-origin-client-tools.tar.gz \
-    && mv oc /usr/bin/oc \
-    && mv kubectl /usr/bin/kubectl \
-    && rm -rf ./openshift* \
-    && oc version
-
-# Install ansible and required packages
-RUN pip2 install ansible pywinrm
-
-# Make Ansible happy with arbitrary UID/GID in OpenShift.
-RUN chmod g=u /etc/passwd /etc/group
-
-RUN mkdir -p /.ansible
-RUN chmod -R g=u+w /.ansible
-
-# Allow building the WMCB and creation of /go/.cache directory
+# Configuring go
+RUN mkdir /go/
 RUN chmod -R g=u+w /go
-
-# Explicitly set GOCACHE environment variable
 ENV GOCACHE="/go/.cache"
 ENV PATH="${PATH}:/usr/local/go/bin"
 ENV GOPATH="/go"
-ENV ANSIBLE_LOCAL_TEMP="/tmp"
 
-ENTRYPOINT [ "/bin/bash" ]
+RUN mkdir /build/
+WORKDIR /build/
+
+# Build kubelet.exe
+RUN git clone https://github.com/openshift/kubernetes.git
+WORKDIR /build/kubernetes/
+RUN KUBE_BUILD_PLATFORMS=windows/amd64 make WHAT=cmd/kubelet
+
+# Build hybrid-overlay-node.exe
+WORKDIR /build/
+RUN git clone https://github.com/openshift/ovn-kubernetes.git
+WORKDIR /build/ovn-kubernetes/go-controller/
+RUN make windows
+
+# Different step for building binaries other then kubelet and hybrid-overlay-node so as to make use of caching
+# while building the container. Building kubelet and hybrid-overlay-node takes considerable time and its not required
+# to build them for every run. We can force building kubelet and hybrid-overlay-node by not using using cache while
+# building the container image. Reduces the container build time considerably.
+FROM golang:1.14.4 as build-binary
+LABEL stage=build-binary
+
+RUN mkdir /build/
+WORKDIR /build/
+COPY . .
+
+# Build WMCB unit and e2e tests
+RUN make build-wmcb-unit-test
+RUN make build-wmcb-e2e-test
+
+FROM golang:1.14.4 as testing
+LABEL stage=testing
+
+WORKDIR /home/test
+COPY internal/test .
+
+COPY --from=build /build/ovn-kubernetes/go-controller/_output/go/bin/windows/hybrid-overlay-node.exe .
+COPY --from=build /build/kubernetes/_output/local/bin/windows/amd64/kubelet.exe .
+COPY --from=build-binary /build/wmcb_unit_test.exe .
+COPY --from=build-binary /build/wmcb_e2e_test.exe .
+
+ENTRYPOINT ["wmcb/runTest.sh"]

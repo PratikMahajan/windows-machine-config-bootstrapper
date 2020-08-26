@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: windows-machine-config-bootstrapper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: windows-machine-config-bootstrapper
+  template:
+    metadata:
+      labels:
+        name: windows-machine-config-bootstrapper
+    spec:
+      hostNetwork: true
+      volumes:
+      - name: cloud-private-key
+        secret:
+          secretName: cloud-private-key
+      - name: aws-creds
+        secret:
+          secretName: aws-creds
+      containers:
+        - name: windows-machine-config-bootstrapper
+          # Replace this with the built image name
+          image: REPLACE_IMAGE
+          imagePullPolicy: Always
+          volumeMounts:
+          - name: cloud-private-key
+            mountPath: "/etc/private-key/"
+            readOnly: true
+          - name: aws-creds
+            mountPath: "/etc/aws-creds/"
+            readOnly: true
+          env:
+            - name: ARTIFACT_DIR
+              value: ARTIFACT_DIR_VALUE
+            - name: AWS_SHARED_CREDENTIALS_FILE
+              value: /etc/aws-creds/credentials
