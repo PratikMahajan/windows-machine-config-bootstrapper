@@ -112,10 +112,14 @@ func TestWMCB(t *testing.T) {
 	for _, vm := range framework.WinVMs {
 		log.Printf("Testing VM: %s", vm.GetCredentials().InstanceId())
 		wVM := &wmcbVM{vm}
-		files := strings.Split(*filesToBeTransferred, ",")
-		for _, file := range files {
-			err := wVM.CopyFile(file, remoteDir)
-			require.NoError(t, err, "error copying %s to the Windows VM", file)
+		folders := strings.Split(*filesToBeTransferred, ",")
+		// all the files in `/payload` directory will be transferred to `C:\Temp`
+		// for files not in payload, new folder will be created in `C:\Temp` which resembles the linux folder path
+		for _, folder := range folders {
+			folderPath := strings.Split(strings.Replace(folder, "/payload", "", -1), "/")
+			remotePath := remoteDir + "\\" + strings.Join(folderPath, "\\")
+			err := wVM.CopyDirectory(folder, remotePath)
+			require.NoError(t, err, "error copying %s to the Windows VM", folder)
 		}
 		t.Run("Unit", func(t *testing.T) {
 			assert.NoError(t, wVM.runTest(unitExecutable+" --test.v"), "WMCB unit test failed")

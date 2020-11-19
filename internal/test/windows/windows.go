@@ -3,6 +3,7 @@ package windows
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ type Windows struct {
 
 // WindowsVM is the interface for interacting with a Windows object created by the cloud provider
 type WindowsVM interface {
+	CopyDirectory(string, string) error
 	// CopyFile copies the given file to the remote directory in the Windows VM. The remote directory is created if it
 	// does not exist
 	CopyFile(string, string) error
@@ -55,6 +57,8 @@ func (w *Windows) CopyFile(filePath, remoteDir string) error {
 	}
 	defer ftp.Close()
 
+	log.Printf("Copying %s file to Windows : %v", filePath, remoteDir)
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("error opening %s file to be transferred: %v", filePath, err)
@@ -78,6 +82,45 @@ func (w *Windows) CopyFile(filePath, remoteDir string) error {
 
 	// Forcefully close it so that we can execute the binary later
 	dstFile.Close()
+	return nil
+}
+
+// CopyDirectories recursively copies the files and directories from the directory on the local host
+// to the remote Windows VM
+func (w *Windows) CopyDirectory(localDir string, remoteDir string) error {
+	if w.SSHClient == nil {
+		return fmt.Errorf("cannot retrieve remote directory without a ssh client")
+	}
+
+	sftp, err := sftp.NewClient(w.SSHClient)
+	if err != nil {
+		return fmt.Errorf("sftp initialization failed: %v", err)
+	}
+	defer sftp.Close()
+
+	log.Printf("Copying %v directory to Windows : %v", localDir, remoteDir)
+
+	// creating a local directory to store the files and directories from remote directory.
+	err = sftp.MkdirAll(remoteDir)
+	if err != nil {
+		return fmt.Errorf("could not create %s: %v", remoteDir, err)
+	}
+
+	// Get the list of all files in the directory
+	localFiles, err := ioutil.ReadDir(localDir)
+	if err != nil {
+		return fmt.Errorf("error opening local directory %s: %v", localDir, err)
+	}
+
+	for _, localFile := range localFiles {
+		localPath := filepath.Join(localDir, localFile.Name())
+		// transfer only files and not directories
+		if !localFile.IsDir() {
+			if err = w.CopyFile(localPath, remoteDir); err != nil {
+				log.Printf("error while copying %s file to Windows : %v", localPath, err)
+			}
+		}
+	}
 	return nil
 }
 

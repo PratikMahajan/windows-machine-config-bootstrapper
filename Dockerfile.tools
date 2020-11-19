@@ -72,7 +72,7 @@ ENV GOCACHE="/go/.cache"
 ENV PATH="${PATH}:/usr/local/go/bin"
 ENV GOPATH="/go"
 
-WORKDIR /home/test
+WORKDIR /payload
 COPY internal/test/wmcb/templates templates
 COPY internal/test/wmcb/powershell/ .
 
@@ -82,6 +82,6 @@ COPY --from=build /build/wmcb_unit_test.exe .
 COPY --from=build /build/wmcb_e2e_test.exe .
 COPY --from=build /build/internal/test/wmcb/test-wmcb .
 
-ENV PATH="${PATH}:/home/test"
+ENV PATH="${PATH}:/payload"
 
 ENTRYPOINT ["/bin/bash"]
