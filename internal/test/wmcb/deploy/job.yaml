@@ -24,7 +24,7 @@ spec:
           command:
             - test-wmcb
           args:
-            - -filesToBeTransferred=/payload
+            - -filesToBeTransferred=/payload,/payload/cni
             - -test.run=TestWMCB
             - -test.v
           volumeMounts:

@@ -52,29 +52,9 @@ type pkgInfo struct {
 // pkgInfoFactory returns PkgInfo specific to the package name
 func pkgInfoFactory(name pkgName, shaType string, baseUrl string, version string) (PkgInfo, error) {
 	switch name {
-	case cniPluginPkgName:
-		return newCniPluginPkg(name, shaType, baseUrl, version)
-
 	default:
 		return nil, fmt.Errorf("invalid Package name")
 	}
-}
-
-// newCniPluginPkg returns cniPlugins implementation of PkgInfo interface
-func newCniPluginPkg(name pkgName, shaType string, baseUrl string, version string) (PkgInfo, error) {
-	if version == "" {
-		return nil, fmt.Errorf("latest cni plugins version not specified")
-	}
-	if baseUrl == "" {
-		return nil, fmt.Errorf("base url for cni plugins not specified")
-	}
-	return &cniPlugins{
-		pkgInfo{
-			name:    name,
-			url:     baseUrl + version + "/cni-plugins-windows-amd64-" + version + ".tgz",
-			shaType: shaType,
-		},
-	}, nil
 }
 
 // getSHAFileContent returns the contents of the SHA file for the given url of the package.

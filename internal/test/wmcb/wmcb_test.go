@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -47,8 +46,6 @@ const (
 	hybridOverlayName = "hybrid-overlay-node.exe"
 	// hybridOverExecutable is the remote location of the hybrid overlay binary
 	hybridOverlayExecutable = remoteDir + hybridOverlayName
-	// cniPluginsBaseURL is the base URL of the CNI Plugins location
-	cniPluginsBaseURL = "https://github.com/containernetworking/plugins/releases/download/"
 )
 
 var (
@@ -77,22 +74,6 @@ type wmcbFramework struct {
 	pkgs map[pkgName]PkgInfo
 }
 
-// initializePackages sets up all the required packages of type pkgInfo
-func (f *wmcbFramework) initializePackages() error {
-	var pkgs = make(map[pkgName]PkgInfo)
-	// create pkgInfo struct that implements PkgInfo interface for cni plugins and populate it
-	cniPluginsPkg, err := pkgInfoFactory(cniPluginPkgName, "sha512", cniPluginsBaseURL,
-		framework.LatestCniPluginsVersion)
-	if err != nil {
-		return err
-	}
-	// Add cniPlugins to the pkgs map
-	pkgs[cniPluginsPkg.getName()] = cniPluginsPkg
-
-	f.pkgs = pkgs
-	return nil
-}
-
 // Setup initializes the wsuFramework.
 func (f *wmcbFramework) Setup(vmCount int, skipVMSetup bool) error {
 	f.TestFramework = &e2ef.TestFramework{}
@@ -100,9 +81,6 @@ func (f *wmcbFramework) Setup(vmCount int, skipVMSetup bool) error {
 	err := f.TestFramework.Setup(vmCount, skipVMSetup)
 	if err != nil {
 		return fmt.Errorf("framework setup failed: %v", err)
-	}
-	if err := f.initializePackages(); err != nil {
-		return fmt.Errorf("unable to initialize CNI Plugins package info: %v", err)
 	}
 	return nil
 }
@@ -260,17 +238,10 @@ func (vm *wmcbVM) initializeTestConfigureCNIFiles(ovnHostSubnet string) error {
 		return fmt.Errorf("unable to create remote directory %s: %v\n%s", remoteDir, err, output)
 	}
 
-	cniPkgUrl := framework.pkgs[cniPluginPkgName].getUrl()
-	cniUrl, err := url.Parse(cniPkgUrl)
-	if err != nil {
-		return fmt.Errorf("error parsing %s: %v", cniPkgUrl, err)
-	}
-
-	// Download and extract the CNI binaries on the Windows VM
-	err = vm.remoteDownloadExtract(framework.pkgs[cniPluginPkgName], remoteDir+path.Base(cniUrl.Path), winCNIDir)
+	out, err := vm.Run(fmt.Sprintf("Move-Item -Path %s -Destination %s", remoteDir+path.Base("cni"), winCNIDir), true)
 
 	if err != nil {
-		return fmt.Errorf("unable to download CNI package: %v", err)
+		return fmt.Errorf("unable to move CNI package: %v: output: %v", err, out)
 	}
 
 	// Create the CNI config file locally
